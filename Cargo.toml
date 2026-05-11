@@ -1,0 +1,135 @@
+[workspace]
+resolver = "2"
+default-members = ["hsb-server"]
+members = [
+    "hsb-common",
+    "hsb-core",
+    "hsb-adapter",
+    "hsb-transport",
+    "hsb-admin",
+    "hsb-server",
+    "hsb-mock-endpoints",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Hospital Service Bus Team"]
+license = "MIT"
+repository = "https://github.com/tangengzhao/aquar"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Web framework
+axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "timeout"] }
+
+# gRPC
+tonic = { version = "0.12", features = ["tls"] }
+tonic-build = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+serde_bytes = "0.11"
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json"] }
+
+# ULID (replaces UUID)
+ulid = { version = "1.1", features = ["serde"] }
+
+# NATS
+async-nats = "0.38"
+
+# Embedded KV store
+redb = "2.4"
+
+# DateTime
+chrono = { version = "0.4", features = ["serde"] }
+
+# Bytes
+bytes = "1.9"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.29"
+opentelemetry = { version = "0.28", features = ["trace", "metrics"] }
+opentelemetry-otlp = { version = "0.28", features = ["tonic"] }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"] }
+
+# Configuration
+config = "0.15"
+dotenvy = "0.15"
+
+# Async traits
+async-trait = "0.1"
+futures-lite = "2.3"
+
+# Regex for routing
+regex = "1.11"
+
+# JSON/XML Path
+jsonpath-rust = "0.7"
+sxd-xpath = "0.4"
+
+# Medical protocols
+dicom = "0.8"
+dicom-core = "0.8"
+dicom-object = "0.8"
+dicom-ul = "0.8"
+fhir-model = "0.4"
+
+# Message queue
+lapin = "2.5"
+rdkafka = { version = "0.36", features = ["cmake-build"] }
+
+# etcd for distributed config
+etcd-client = "0.14"
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Validation
+validator = { version = "0.19", features = ["derive"] }
+
+# Rate limiting
+governor = "0.8"
+
+# Retry
+backon = "1.3"
+
+# Crypto for auth
+argon2 = "0.5"
+jsonwebtoken = "9.3"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Internal crates
+hsb-common = { path = "hsb-common" }
+hsb-core = { path = "hsb-core" }
+hsb-adapter = { path = "hsb-adapter" }
+hsb-transport = { path = "hsb-transport" }
+hsb-admin = { path = "hsb-admin" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

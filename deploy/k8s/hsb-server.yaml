@@ -1,0 +1,279 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admin
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hsb-server-secret
+  namespace: admin
+type: Opaque
+stringData:
+  HSB_DATABASE_URL: postgres://hsbuser:change-me@postgres.admin.svc.cluster.local:5432/hsb
+  RUST_SSO_CLIENT_SECRET: change-me
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hsb-server-config
+  namespace: admin
+data:
+  hsb.toml: |
+    [server]
+    name = "hsb-server"
+    environment = "production"
+    max_concurrency = 1000
+    shutdown_timeout_secs = 30
+
+    [http]
+    enabled = true
+    listen_address = "0.0.0.0"
+    port = 8080
+    route_prefix = "/hsb"
+    admin_port = 8081
+    tls_enabled = false
+    request_timeout_secs = 30
+    max_body_size = 10485760
+
+    [tcp]
+    enabled = true
+    listen_address = "0.0.0.0"
+    port = 2575
+    max_connections = 100
+    connection_timeout_secs = 30
+    read_timeout_secs = 60
+    write_timeout_secs = 30
+
+    [grpc]
+    enabled = true
+    listen_address = "0.0.0.0"
+    port = 10051
+    max_concurrent_streams = 100
+    tls_enabled = false
+
+    [database]
+    url = "postgres://hsbuser:change-me@postgres.admin.svc.cluster.local:5432/hsb"
+    max_connections = 20
+    min_connections = 2
+    connect_timeout_secs = 30
+    idle_timeout_secs = 600
+
+    [cache]
+    enabled = true
+    default_ttl_secs = 300
+    cleanup_interval_secs = 60
+
+    [mq]
+    enabled = true
+    host = "rabbitmq.admin.svc.cluster.local"
+    port = 5672
+    username = "guest"
+    password = "guest"
+    vhost = "/"
+    prefetch_count = 10
+    queue_prefix = "hsb"
+
+    [kafka]
+    enabled = false
+    bootstrap_servers = "redpanda.admin.svc.cluster.local:9092"
+    client_id = "hsb-server"
+    default_topic = "hsb.events.v1"
+    security_protocol = "PLAINTEXT"
+    socket_timeout_secs = 30
+    message_timeout_secs = 30
+
+    [kafka.consumer]
+    group_id = "hsb-server-group"
+    topics = ["hsb.events.v1"]
+    start_from_earliest = false
+    session_timeout_secs = 30
+
+    [nats]
+    enabled = true
+    urls = ["nats://nats.admin.svc.cluster.local:4222"]
+    subject_prefix = "hsb"
+    jetstream_enabled = true
+    jetstream_stream = "HSB_MESSAGES"
+    jetstream_subjects = ["hsb.>"]
+    max_age_secs = 604800
+
+    [persistence]
+    redb_path = "/var/lib/hsb/hsb_local.redb"
+    redb_enabled = true
+    postgres_enabled = true
+
+    [sso]
+    enabled = true
+    endpoint = "http://rust-sso.admin.svc.cluster.local:50051"
+    web_base_url = "https://mydomain.com/rust-sso"
+    client_id = "hsb-service"
+    client_secret = "change-me"
+    callback_url = "https://mydomain.com/hsb/auth/callback"
+    scope = "openid profile email"
+    token_cache_secs = 300
+
+    [audit]
+    enabled = true
+    log_message_content = false
+    mask_sensitive_data = true
+    retention_days = 90
+    batch_size = 100
+
+    [reliability]
+    max_retries = 3
+    retry_base_delay_ms = 1000
+    enable_dlq = true
+    circuit_breaker_threshold = 5
+    circuit_breaker_recovery_secs = 60
+
+    [logging]
+    level = "info"
+    json_format = true
+    file_path = "/var/log/hsb/hsb.log"
+    max_file_size_mb = 100
+    max_files = 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hsb-server
+  namespace: admin
+  labels:
+    app: hsb-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hsb-server
+  template:
+    metadata:
+      labels:
+        app: hsb-server
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull-secret
+      containers:
+        - name: hsb-server
+          image: private-resgistry/admin/hsb-server:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - start
+            - --config
+            - /etc/hsb/hsb.toml
+          env:
+            - name: HSB_ROUTE_PREFIX
+              value: /hsb
+            - name: HSB_KAFKA_ENABLED
+              value: "false"
+            - name: HSB_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: hsb-server-secret
+                  key: HSB_DATABASE_URL
+            - name: RUST_SSO_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: hsb-server-secret
+                  key: RUST_SSO_CLIENT_SECRET
+            - name: HSB_KAFKA_BOOTSTRAP_SERVERS
+              value: redpanda.admin.svc.cluster.local:9092
+            - name: HSB_KAFKA_TOPICS
+              value: hsb.events.v1
+            - name: HSB_NATS_URLS
+              value: nats://nats.admin.svc.cluster.local:4222
+            - name: RUST_SSO_WEB_BASE_URL
+              value: https://mydomain.com/rust-sso
+            - name: HSB_SSO_CALLBACK_URL
+              value: https://mydomain.com/hsb/auth/callback
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 8081
+            - name: tcp-mllp
+              containerPort: 2575
+            - name: grpc
+              containerPort: 10051
+          readinessProbe:
+            httpGet:
+              path: /hsb/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /hsb/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/hsb
+              readOnly: true
+            - name: hsb-data
+              mountPath: /var/lib/hsb
+            - name: hsb-logs
+              mountPath: /var/log/hsb
+      volumes:
+        - name: config
+          configMap:
+            name: hsb-server-config
+            items:
+              - key: hsb.toml
+                path: hsb.toml
+        - name: hsb-data
+          emptyDir: {}
+        - name: hsb-logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hsb-server
+  namespace: admin
+  labels:
+    app: hsb-server
+spec:
+  type: ClusterIP
+  selector:
+    app: hsb-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: admin
+      port: 8081
+      targetPort: admin
+    - name: tcp-mllp
+      port: 2575
+      targetPort: tcp-mllp
+    - name: grpc
+      port: 10051
+      targetPort: grpc
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hsb-server
+  namespace: admin
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: mydomain.com
+      http:
+        paths:
+          - path: /hsb
+            pathType: Prefix
+            backend:
+              service:
+                name: hsb-server
+                port:
+                  name: http

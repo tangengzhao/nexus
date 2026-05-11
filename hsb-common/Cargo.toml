@@ -1,0 +1,37 @@
+[package]
+name = "hsb-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hospital Service Bus - Common types and utilities"
+
+[dependencies]
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP / SSO
+reqwest = { workspace = true }
+base64 = "0.22"
+rand = "0.8"
+urlencoding = "2"
+
+# Types
+ulid = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+
+# Validation
+validator = { workspace = true }

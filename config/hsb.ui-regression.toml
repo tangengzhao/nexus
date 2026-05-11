@@ -1,0 +1,112 @@
+[server]
+name = "hsb-server"
+environment = "development"
+max_concurrency = 1000
+shutdown_timeout_secs = 30
+
+[http]
+enabled = true
+listen_address = "127.0.0.1"
+port = 8080
+admin_port = 8081
+tls_enabled = false
+request_timeout_secs = 30
+max_body_size = 10485760
+
+[tcp]
+enabled = false
+listen_address = "127.0.0.1"
+port = 2575
+max_connections = 100
+connection_timeout_secs = 30
+read_timeout_secs = 60
+write_timeout_secs = 30
+
+[grpc]
+enabled = false
+listen_address = "127.0.0.1"
+port = 50051
+max_concurrent_streams = 100
+tls_enabled = false
+
+[database]
+url = "postgres://postgres:postgres@127.0.0.1:5432/hsb"
+max_connections = 10
+min_connections = 2
+connect_timeout_secs = 30
+idle_timeout_secs = 600
+
+[cache]
+enabled = true
+default_ttl_secs = 300
+cleanup_interval_secs = 60
+
+[mq]
+enabled = false
+host = "127.0.0.1"
+port = 5672
+username = "guest"
+password = "guest"
+vhost = "/"
+prefetch_count = 10
+queue_prefix = "hsb"
+
+[kafka]
+enabled = false
+bootstrap_servers = "127.0.0.1:9092"
+client_id = "hsb-server"
+default_topic = "hsb.events.v1"
+security_protocol = "PLAINTEXT"
+socket_timeout_secs = 30
+message_timeout_secs = 30
+
+[kafka.consumer]
+group_id = "hsb-server-group"
+topics = ["hsb.events.v1"]
+start_from_earliest = false
+session_timeout_secs = 30
+
+[nats]
+enabled = false
+urls = ["nats://127.0.0.1:4222"]
+subject_prefix = "hsb"
+jetstream_enabled = false
+jetstream_stream = "HSB_MESSAGES"
+jetstream_subjects = ["hsb.>"]
+max_age_secs = 604800
+
+[persistence]
+redb_path = "/tmp/hsb_local.redb"
+redb_enabled = true
+postgres_enabled = true
+
+[sso]
+enabled = false
+endpoint = "http://127.0.0.1:50052"
+web_base_url = "http://127.0.0.1:50052"
+client_id = ""
+client_secret = ""
+callback_url = "http://127.0.0.1:8080/auth/callback"
+scope = "openid profile email"
+token_cache_secs = 300
+
+[audit]
+enabled = true
+log_message_content = false
+mask_sensitive_data = true
+retention_days = 90
+batch_size = 100
+
+[reliability]
+max_retries = 3
+retry_base_delay_ms = 1000
+enable_dlq = true
+circuit_breaker_threshold = 5
+circuit_breaker_recovery_secs = 60
+
+[logging]
+level = "info"
+json_format = false
+file_path = "/tmp/hsb-ui-regression.log"
+max_file_size_mb = 100
+max_files = 10

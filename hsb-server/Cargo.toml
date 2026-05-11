@@ -1,0 +1,52 @@
+[package]
+name = "hsb-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hospital Service Bus - Main Server"
+
+[[bin]]
+name = "hsb-server"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+hsb-common = { workspace = true }
+hsb-core = { workspace = true }
+hsb-adapter = { workspace = true }
+hsb-transport = { workspace = true }
+hsb-admin = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# HTTP
+axum = { workspace = true }
+axum-extra = { workspace = true, features = ["cookie"] }
+
+# Configuration
+config = "0.14"
+toml = "0.8"
+dotenvy = { workspace = true }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Types
+bytes = { workspace = true }
+chrono = { workspace = true }
+ulid = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1"
+
+# Tracing
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

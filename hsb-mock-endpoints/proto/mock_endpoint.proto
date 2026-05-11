@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package mockendpoint;
+
+message MockMessageRequest {
+  string message_id = 1;
+  string protocol = 2;
+  string message_type = 3;
+  string source = 4;
+  string target = 5;
+  string scenario = 6;
+  string content_type = 7;
+  string payload_json = 8;
+  bytes raw_payload = 9;
+  map<string, string> headers = 10;
+}
+
+message FailureDetail {
+  string code = 1;
+  string category = 2;
+  string message = 3;
+  bool retriable = 4;
+}
+
+message MockMessageReply {
+  string endpoint_id = 1;
+  string service_name = 2;
+  string role = 3;
+  string transport = 4;
+  string status = 5;
+  bool accepted = 6;
+  string message_id = 7;
+  string trace_id = 8;
+  string protocol = 9;
+  uint32 http_status = 10;
+  uint64 processing_time_ms = 11;
+  string timestamp = 12;
+  repeated string scenario_tags = 13;
+  FailureDetail failure = 14;
+}
+
+message CapabilitiesRequest {}
+
+message CapabilitiesReply {
+  string endpoint_id = 1;
+  string service_name = 2;
+  string role = 3;
+  uint32 port = 4;
+  repeated string supported_protocols = 5;
+  repeated string scenario_tags = 6;
+  repeated string transports = 7;
+  string description = 8;
+}
+
+service MockEndpointService {
+  rpc HandleMessage(MockMessageRequest) returns (MockMessageReply);
+  rpc GetCapabilities(CapabilitiesRequest) returns (CapabilitiesReply);
+}

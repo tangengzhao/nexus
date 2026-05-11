@@ -1,0 +1,51 @@
+[package]
+name = "hsb-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hospital Service Bus - Core models, engine, persistence, reliability and cluster"
+
+[dependencies]
+# Internal
+hsb-common = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures-lite = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = { workspace = true }
+
+# Types
+ulid = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+
+# Regex for routing
+regex = { workspace = true }
+
+# JSON/XML Path
+jsonpath-rust = { workspace = true }
+
+# Engine extras
+rand = "0.8"
+
+# Persistence - Redb
+redb = { workspace = true }
+
+# Persistence - PostgreSQL
+sqlx = { workspace = true }
+
+# Cluster communication (K8s)
+async-nats = { workspace = true }

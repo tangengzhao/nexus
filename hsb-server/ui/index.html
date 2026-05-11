@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nexus HSB Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+  <style>
+    :root {
+      --bg: #eef3f7;
+      --panel: rgba(255, 255, 255, 0.88);
+      --panel-strong: #ffffff;
+      --line: rgba(15, 55, 78, 0.12);
+      --text: #17384b;
+      --muted: #678295;
+      --primary: #0f766e;
+      --primary-deep: #134e4a;
+      --accent: #d97706;
+      --danger: #c2410c;
+      --shadow: 0 18px 48px rgba(23, 56, 75, 0.12);
+      --radius: 22px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: 'IBM Plex Sans', 'Noto Sans SC', sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(15, 118, 110, 0.18), transparent 24%),
+        radial-gradient(circle at left center, rgba(217, 119, 6, 0.12), transparent 18%),
+        linear-gradient(180deg, #f8fbfd 0%, var(--bg) 100%);
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(23, 56, 75, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 56, 75, 0.04) 1px, transparent 1px);
+      background-size: 24px 24px;
+      mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.28), transparent 85%);
+    }
+
+    #app {
+      min-height: 100vh;
+      position: relative;
+      z-index: 1;
+    }
+
+    .shell {
+      min-height: 100vh;
+      padding: 18px;
+    }
+
+    .shell__aside {
+      border-right: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(15, 118, 110, 0.1), rgba(255, 255, 255, 0.72));
+      backdrop-filter: blur(16px);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .brand {
+      padding: 22px 20px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand__eyebrow {
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .brand__title {
+      margin-top: 8px;
+      font-size: 24px;
+      font-weight: 700;
+      line-height: 1.1;
+    }
+
+    .brand__subtitle {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .shell__header {
+      margin-bottom: 18px;
+      padding: 18px 22px;
+      background: var(--panel);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .shell__title {
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.1;
+      margin: 0;
+    }
+
+    .shell__desc {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .page-card,
+    .metric-card,
+    .panel-card {
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.75);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+
+    .page-card {
+      padding: 20px 22px;
+    }
+
+    .page-card + .page-card {
+      margin-top: 18px;
+    }
+
+    .metric-card {
+      padding: 18px 20px;
+      min-height: 138px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .metric-card__label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .metric-card__value {
+      font-size: 34px;
+      font-weight: 700;
+      line-height: 1;
+      margin-top: 18px;
+    }
+
+    .metric-card__footer {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .page-section-title {
+      margin: 0 0 14px;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .page-section-subtitle {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .stack-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .filters-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .hero-grid,
+    .stats-grid,
+    .workflow-grid,
+    .system-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .hero-grid,
+    .stats-grid {
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .workflow-grid {
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .system-grid {
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    }
+
+    .mini-stat {
+      padding: 16px 18px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.66);
+    }
+
+    .mini-stat__label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .mini-stat__value {
+      margin-top: 10px;
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .workflow-card {
+      padding: 20px;
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(244, 250, 250, 0.92));
+    }
+
+    .workflow-card__title {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0;
+    }
+
+    .workflow-card__meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+
+    .workflow-card__desc {
+      margin-top: 12px;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+      min-height: 66px;
+    }
+
+    .workflow-steps {
+      margin-top: 16px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .code-block textarea.el-textarea__inner {
+      min-height: 420px;
+      font-family: 'IBM Plex Mono', ui-monospace, monospace;
+      border-radius: 18px;
+    }
+
+    .menu-note {
+      margin: 14px 20px 20px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(15, 118, 110, 0.09);
+      color: var(--primary-deep);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .el-menu {
+      border-right: none;
+      background: transparent;
+    }
+
+    .el-menu-item,
+    .el-sub-menu__title {
+      height: 46px;
+      line-height: 46px;
+      border-radius: 14px;
+      margin: 4px 10px;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .el-menu-item.is-active {
+      background: rgba(15, 118, 110, 0.14);
+      color: var(--primary-deep);
+    }
+
+    .el-table,
+    .el-input__wrapper,
+    .el-select__wrapper,
+    .el-textarea__inner,
+    .el-dialog,
+    .el-drawer,
+    .el-card,
+    .el-descriptions {
+      border-radius: 18px;
+    }
+
+    .el-table {
+      --el-table-header-bg-color: rgba(15, 118, 110, 0.08);
+      --el-table-row-hover-bg-color: rgba(15, 118, 110, 0.06);
+    }
+
+    .toolbar-right {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .content-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 18px;
+    }
+
+    @media (max-width: 960px) {
+      .shell {
+        padding: 10px;
+      }
+
+      .shell .el-container {
+        flex-direction: column;
+      }
+
+      .shell__aside {
+        width: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script>window.HSB_ROUTE_PREFIX = "__HSB_ROUTE_PREFIX__";</script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
+  <script src="https://unpkg.com/element-plus/dist/index.full.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

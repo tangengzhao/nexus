@@ -1,0 +1,64 @@
+[package]
+name = "hsb-mock-endpoints"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Independent mock endpoint services for HSB integration testing"
+build = "build.rs"
+
+[lib]
+name = "hsb_mock_endpoints"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hsb-endpoint-0"
+path = "src/bin/endpoint_0.rs"
+
+[[bin]]
+name = "hsb-endpoint-1"
+path = "src/bin/endpoint_1.rs"
+
+[[bin]]
+name = "hsb-endpoint-2"
+path = "src/bin/endpoint_2.rs"
+
+[[bin]]
+name = "hsb-endpoint-3"
+path = "src/bin/endpoint_3.rs"
+
+[[bin]]
+name = "hsb-endpoint-4"
+path = "src/bin/endpoint_4.rs"
+
+[[bin]]
+name = "hsb-sim-10-systems"
+path = "src/bin/sim_10_systems.rs"
+
+[[bin]]
+name = "hsb-sim-random-non-hl7v3"
+path = "src/bin/sim_random_non_hl7v3.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+dotenvy = { workspace = true }
+futures-util = "0.3"
+http = "1.2"
+rand = "0.8"
+prost = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ulid = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
