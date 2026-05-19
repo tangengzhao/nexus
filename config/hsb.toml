@@ -33,7 +33,7 @@ max_concurrent_streams = 100
 tls_enabled = false
 
 [database]
-url = "postgres://postgres:postgres@postgres:5432/hsb"
+url = "postgres://hsb:gm-00941@127.0.0.1:5432/hsb"
 max_connections = 10
 min_connections = 2
 connect_timeout_secs = 30
@@ -86,7 +86,7 @@ postgres_enabled = true
 [sso]
 enabled = true
 endpoint = "http://127.0.0.1:50051"
-web_base_url = "http://127.0.0.1:50051"
+web_base_url = "http://127.0.0.1:8099"
 client_id = "hsb-service"
 client_secret = "change-me"
 callback_url = "http://127.0.0.1:8080/auth/callback"

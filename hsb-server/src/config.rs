@@ -71,12 +71,18 @@ impl ServerConfig {
         let content = std::fs::read_to_string(path)?;
         let mut config: Self = toml::from_str(&content)?;
         config.apply_env_overrides();
+        config.validate_security()?;
         Ok(config)
     }
 
     fn apply_env_overrides(&mut self) {
         self.database.url = env_string("HSB_DATABASE_URL", &self.database.url);
+        self.mq.enabled = env_bool("HSB_MQ_ENABLED", self.mq.enabled);
         self.mq.host = env_string("HSB_MQ_HOST", &self.mq.host);
+        self.mq.port = env_u16("HSB_MQ_PORT", self.mq.port);
+        self.mq.username = env_string("HSB_MQ_USERNAME", &self.mq.username);
+        self.mq.password = env_string("HSB_MQ_PASSWORD", &self.mq.password);
+        self.mq.vhost = env_string("HSB_MQ_VHOST", &self.mq.vhost);
         self.kafka.enabled = env_bool("HSB_KAFKA_ENABLED", self.kafka.enabled);
         self.kafka.bootstrap_servers =
             env_string("HSB_KAFKA_BOOTSTRAP_SERVERS", &self.kafka.bootstrap_servers);
@@ -99,12 +105,36 @@ impl ServerConfig {
         self.http.route_prefix =
             normalize_route_prefix(&env_string("HSB_ROUTE_PREFIX", &self.http.route_prefix));
         self.nats.urls = env_csv("HSB_NATS_URLS", &self.nats.urls);
+        self.sso.enabled = env_bool("HSB_SSO_ENABLED", self.sso.enabled);
         self.sso.endpoint = env_string("RUST_SSO_GRPC_ENDPOINT", &self.sso.endpoint);
         self.sso.web_base_url = env_string("RUST_SSO_WEB_BASE_URL", &self.sso.web_base_url);
         self.sso.client_id = env_string("RUST_SSO_CLIENT_ID", &self.sso.client_id);
         self.sso.client_secret = env_string("RUST_SSO_CLIENT_SECRET", &self.sso.client_secret);
         self.sso.callback_url = env_string("HSB_SSO_CALLBACK_URL", &self.sso.callback_url);
         self.sso.scope = env_string("HSB_SSO_SCOPE", &self.sso.scope);
+    }
+
+    fn validate_security(&self) -> anyhow::Result<()> {
+        if !self.server.environment.eq_ignore_ascii_case("production") {
+            return Ok(());
+        }
+
+        if self.sso.enabled && is_placeholder_secret(&self.sso.client_secret) {
+            anyhow::bail!("production SSO requires RUST_SSO_CLIENT_SECRET to be set to a non-placeholder secret");
+        }
+
+        if self.mq.enabled
+            && self.mq.username == "guest"
+            && is_placeholder_secret(&self.mq.password)
+        {
+            anyhow::bail!("production MQ requires non-default HSB_MQ_USERNAME/HSB_MQ_PASSWORD");
+        }
+
+        if self.persistence.postgres_enabled && database_url_uses_placeholder_secret(&self.database.url) {
+            anyhow::bail!("production database URL contains a placeholder or default password");
+        }
+
+        Ok(())
     }
 }
 
@@ -235,7 +265,7 @@ impl Default for GrpcSettings {
         Self {
             enabled: true,
             listen_address: "0.0.0.0".to_string(),
-            port: 50051,
+            port: 10051,
             max_concurrent_streams: 100,
             tls_enabled: false,
             tls_cert_path: None,
@@ -425,8 +455,8 @@ impl Default for SsoSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            endpoint: env_string("RUST_SSO_GRPC_ENDPOINT", "http://rust-sso:50052"),
-            web_base_url: env_string("RUST_SSO_WEB_BASE_URL", "http://rust-sso:50052"),
+            endpoint: env_string("RUST_SSO_GRPC_ENDPOINT", "http://rust-sso:50051"),
+            web_base_url: env_string("RUST_SSO_WEB_BASE_URL", "http://rust-sso:8099"),
             client_id: env_string("RUST_SSO_CLIENT_ID", ""),
             client_secret: env_string("RUST_SSO_CLIENT_SECRET", ""),
             callback_url: env_string(
@@ -598,6 +628,13 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_u16(key: &str, default: u16) -> u16 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(default)
+}
+
 fn env_bool(key: &str, default: bool) -> bool {
     env::var(key)
         .ok()
@@ -607,6 +644,25 @@ fn env_bool(key: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+fn is_placeholder_secret(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || matches!(
+            normalized.as_str(),
+            "change-me" | "changeme" | "guest" | "password" | "secret" | "default"
+        )
+        || normalized.starts_with("replace_with")
+        || normalized.starts_with("replace-with")
+}
+
+fn database_url_uses_placeholder_secret(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    normalized.contains(":change-me@")
+        || normalized.contains(":changeme@")
+        || normalized.contains(":postgres@")
+        || normalized.contains(":password@")
 }
 
 fn env_csv(key: &str, default: &[String]) -> Vec<String> {
@@ -630,5 +686,32 @@ fn normalize_route_prefix(value: &str) -> String {
         String::new()
     } else {
         format!("/{}", trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerConfig;
+
+    #[test]
+    fn production_rejects_placeholder_sso_secret() {
+        let mut config = ServerConfig::default();
+        config.server.environment = "production".to_string();
+        config.sso.enabled = true;
+        config.sso.client_secret = "change-me".to_string();
+
+        assert!(config.validate_security().is_err());
+    }
+
+    #[test]
+    fn production_rejects_default_mq_credentials() {
+        let mut config = ServerConfig::default();
+        config.server.environment = "production".to_string();
+        config.sso.enabled = false;
+        config.mq.enabled = true;
+        config.mq.username = "guest".to_string();
+        config.mq.password = "guest".to_string();
+
+        assert!(config.validate_security().is_err());
     }
 }

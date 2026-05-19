@@ -78,6 +78,7 @@ impl ServiceDiscovery {
         self.nats_client = Some(client.clone());
 
         // 启动心跳发送
+        let publish_client = client.clone();
         let instance_id = self.instance_id.clone();
         let interval = self.heartbeat_interval_secs;
         tokio::spawn(async move {
@@ -95,7 +96,7 @@ impl ServiceDiscovery {
                 };
                 if let Ok(payload) = serde_json::to_vec(&heartbeat) {
                     let subject = topics::SYSTEM_CLUSTER_HEARTBEAT.to_string();
-                    if let Err(e) = client.publish(subject, payload.into()).await {
+                    if let Err(e) = publish_client.publish(subject, payload.into()).await {
                         warn!("Failed to publish heartbeat: {}", e);
                     }
                 }
@@ -106,7 +107,7 @@ impl ServiceDiscovery {
         let peers = self.peers.clone();
         let timeout = self.heartbeat_timeout_secs;
         let self_id = self.instance_id.clone();
-        let sub_client = self.nats_client.as_ref().unwrap().clone();
+        let sub_client = client.clone();
         let subject = topics::SYSTEM_CLUSTER_HEARTBEAT.to_string();
         tokio::spawn(async move {
             let mut sub = match sub_client.subscribe(subject).await {

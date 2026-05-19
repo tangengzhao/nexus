@@ -33,7 +33,7 @@ pub struct SsoClientConfig {
 impl Default for SsoClientConfig {
     fn default() -> Self {
         Self {
-            endpoint: env_string("RUST_SSO_GRPC_ENDPOINT", "http://rust-sso:50052"),
+            endpoint: env_string("RUST_SSO_GRPC_ENDPOINT", "http://rust-sso:50051"),
             client_id: String::new(),
             client_secret: String::new(),
             connect_timeout_secs: 10,

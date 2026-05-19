@@ -50,14 +50,14 @@ impl Hl7Parser {
         }
 
         // 提取 MSH 字段
-        let sending_app = msh.get_field(2).unwrap_or_default();
-        let sending_facility = msh.get_field(3).unwrap_or_default();
-        let receiving_app = msh.get_field(4).unwrap_or_default();
-        let receiving_facility = msh.get_field(5).unwrap_or_default();
-        let message_type = msh.get_field(8).unwrap_or_default();
-        let message_control_id = msh.get_field(9).unwrap_or_default();
-        let processing_id = msh.get_field(10).unwrap_or_default();
-        let _version_id = msh.get_field(11).unwrap_or_default();
+        let sending_app = msh.get_field(3).unwrap_or_default();
+        let sending_facility = msh.get_field(4).unwrap_or_default();
+        let receiving_app = msh.get_field(5).unwrap_or_default();
+        let receiving_facility = msh.get_field(6).unwrap_or_default();
+        let message_type = msh.get_field(9).unwrap_or_default();
+        let message_control_id = msh.get_field(10).unwrap_or_default();
+        let processing_id = msh.get_field(11).unwrap_or_default();
+        let _version_id = msh.get_field(12).unwrap_or_default();
 
         // 构建 JSON payload
         let payload = self.segments_to_json(&segments);

@@ -82,8 +82,8 @@ postgres_enabled = true
 
 [sso]
 enabled = false
-endpoint = "http://127.0.0.1:50052"
-web_base_url = "http://127.0.0.1:50052"
+endpoint = "http://127.0.0.1:50051"
+web_base_url = "http://127.0.0.1:8099"
 client_id = ""
 client_secret = ""
 callback_url = "http://127.0.0.1:8090/auth/callback"

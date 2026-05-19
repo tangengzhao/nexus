@@ -260,7 +260,7 @@ mod tests {
         let config = CircuitBreakerConfig {
             failure_threshold: 1,
             success_threshold: 2,
-            open_duration_secs: 0, // 立即进入半开
+            open_duration_secs: 1,
             ..Default::default()
         };
         let cb = CircuitBreaker::new("test", config);
@@ -268,8 +268,7 @@ mod tests {
         cb.record_failure().await;
         assert_eq!(cb.state().await, CircuitState::Open);
 
-        // 等待进入半开状态
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        *cb.last_failure_time.write().await = Some(Instant::now() - Duration::from_secs(2));
         assert_eq!(cb.state().await, CircuitState::HalfOpen);
 
         cb.record_success().await;

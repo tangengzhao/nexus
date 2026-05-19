@@ -25,9 +25,10 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{Postgres, QueryBuilder, Row};
 
 use super::{
-    EndpointStore, IntegrationSystemStore, OrganizationStore, PersistentMessageQuery,
-    PersistentMessageStore, PostgresConfig, RouteStore, StoredWorkflowDefinition,
-    WorkflowInstanceQuery, WorkflowStore,
+    CustomProtocolStore, EndpointStore, IntegrationSystemStore, OrganizationStore,
+    PersistentMessageQuery, PersistentMessageStore, PostgresConfig, RouteStore,
+    StoredCustomProtocol, StoredTopic, StoredWorkflowDefinition, TopicStore, WorkflowInstanceQuery,
+    WorkflowStore,
 };
 
 /// PostgreSQL 持久化存储
@@ -180,6 +181,31 @@ impl PgStore {
             )
             "#,
             r#"
+            CREATE TABLE IF NOT EXISTS hsb_topics (
+                topic           TEXT PRIMARY KEY,
+                description     TEXT,
+                owner_system_id TEXT,
+                enabled         BOOLEAN NOT NULL DEFAULT true,
+                properties      JSONB NOT NULL DEFAULT '{}',
+                created_at      TIMESTAMPTZ NOT NULL,
+                updated_at      TIMESTAMPTZ NOT NULL
+            )
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS hsb_custom_protocols (
+                id             TEXT PRIMARY KEY,
+                name           TEXT NOT NULL,
+                description    TEXT,
+                transport_hint TEXT,
+                content_type   TEXT,
+                fields         JSONB NOT NULL DEFAULT '[]',
+                sample_payload JSONB,
+                enabled        BOOLEAN NOT NULL DEFAULT true,
+                created_at     TIMESTAMPTZ NOT NULL,
+                updated_at     TIMESTAMPTZ NOT NULL
+            )
+            "#,
+            r#"
             CREATE TABLE IF NOT EXISTS hsb_endpoint_versions (
                 endpoint_id     TEXT NOT NULL,
                 version         INTEGER NOT NULL,
@@ -276,6 +302,10 @@ impl PgStore {
             "CREATE INDEX IF NOT EXISTS idx_endpoints_system ON hsb_endpoints(system_id)",
             "CREATE INDEX IF NOT EXISTS idx_endpoints_enabled ON hsb_endpoints(enabled)",
             "CREATE INDEX IF NOT EXISTS idx_endpoints_lifecycle ON hsb_endpoints(lifecycle_status)",
+            "CREATE INDEX IF NOT EXISTS idx_topics_owner_system ON hsb_topics(owner_system_id)",
+            "CREATE INDEX IF NOT EXISTS idx_topics_enabled ON hsb_topics(enabled)",
+            "CREATE INDEX IF NOT EXISTS idx_custom_protocols_enabled ON hsb_custom_protocols(enabled)",
+            "CREATE INDEX IF NOT EXISTS idx_custom_protocols_transport ON hsb_custom_protocols(transport_hint)",
             "CREATE INDEX IF NOT EXISTS idx_endpoint_versions_changed_at ON hsb_endpoint_versions(changed_at)",
             "CREATE INDEX IF NOT EXISTS idx_endpoint_status_updated_at ON hsb_endpoint_status(updated_at)",
             "CREATE INDEX IF NOT EXISTS idx_workflows_name ON hsb_workflows(name)",
@@ -435,6 +465,37 @@ impl PgStore {
                 self.row_try_get(&row, "properties")?,
                 "integration_system.properties",
             )?,
+            created_at: self.row_try_get(&row, "created_at")?,
+            updated_at: self.row_try_get(&row, "updated_at")?,
+        })
+    }
+
+    fn row_to_stored_topic(&self, row: sqlx::postgres::PgRow) -> HsbResult<StoredTopic> {
+        Ok(StoredTopic {
+            topic: self.row_try_get(&row, "topic")?,
+            description: self.row_try_get(&row, "description")?,
+            owner_system_id: self.row_try_get(&row, "owner_system_id")?,
+            enabled: self.row_try_get(&row, "enabled")?,
+            properties: self
+                .parse_json(self.row_try_get(&row, "properties")?, "topic.properties")?,
+            created_at: self.row_try_get(&row, "created_at")?,
+            updated_at: self.row_try_get(&row, "updated_at")?,
+        })
+    }
+
+    fn row_to_stored_custom_protocol(
+        &self,
+        row: sqlx::postgres::PgRow,
+    ) -> HsbResult<StoredCustomProtocol> {
+        Ok(StoredCustomProtocol {
+            id: self.row_try_get(&row, "id")?,
+            name: self.row_try_get(&row, "name")?,
+            description: self.row_try_get(&row, "description")?,
+            transport_hint: self.row_try_get(&row, "transport_hint")?,
+            content_type: self.row_try_get(&row, "content_type")?,
+            fields: self.row_try_get(&row, "fields")?,
+            sample_payload: self.row_try_get(&row, "sample_payload")?,
+            enabled: self.row_try_get(&row, "enabled")?,
             created_at: self.row_try_get(&row, "created_at")?,
             updated_at: self.row_try_get(&row, "updated_at")?,
         })
@@ -1197,6 +1258,205 @@ impl IntegrationSystemStore for PgStore {
             .await
             .map_err(|e| HsbError::DatabaseError {
                 message: format!("Failed to delete system: {}", e),
+            })?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CustomProtocolStore for PgStore {
+    async fn create_custom_protocol(&self, protocol: &StoredCustomProtocol) -> HsbResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO hsb_custom_protocols (
+                id, name, description, transport_hint, content_type,
+                fields, sample_payload, enabled, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(&protocol.id)
+        .bind(&protocol.name)
+        .bind(&protocol.description)
+        .bind(&protocol.transport_hint)
+        .bind(&protocol.content_type)
+        .bind(&protocol.fields)
+        .bind(&protocol.sample_payload)
+        .bind(protocol.enabled)
+        .bind(protocol.created_at)
+        .bind(protocol.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HsbError::DatabaseError {
+            message: format!("Failed to create custom protocol: {}", e),
+        })?;
+        Ok(())
+    }
+
+    async fn get_custom_protocol(&self, id: &str) -> HsbResult<Option<StoredCustomProtocol>> {
+        let row = sqlx::query(
+            "SELECT id, name, description, transport_hint, content_type, fields, sample_payload, enabled, created_at, updated_at FROM hsb_custom_protocols WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| HsbError::DatabaseError {
+            message: format!("Failed to load custom protocol: {}", e),
+        })?;
+
+        row.map(|row| self.row_to_stored_custom_protocol(row))
+            .transpose()
+    }
+
+    async fn list_custom_protocols(&self) -> HsbResult<Vec<StoredCustomProtocol>> {
+        let rows = sqlx::query(
+            "SELECT id, name, description, transport_hint, content_type, fields, sample_payload, enabled, created_at, updated_at FROM hsb_custom_protocols ORDER BY name ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| HsbError::DatabaseError {
+            message: format!("Failed to list custom protocols: {}", e),
+        })?;
+
+        rows.into_iter()
+            .map(|row| self.row_to_stored_custom_protocol(row))
+            .collect()
+    }
+
+    async fn update_custom_protocol(&self, protocol: &StoredCustomProtocol) -> HsbResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE hsb_custom_protocols
+            SET name = $2,
+                description = $3,
+                transport_hint = $4,
+                content_type = $5,
+                fields = $6,
+                sample_payload = $7,
+                enabled = $8,
+                updated_at = $9
+            WHERE id = $1
+            "#,
+        )
+        .bind(&protocol.id)
+        .bind(&protocol.name)
+        .bind(&protocol.description)
+        .bind(&protocol.transport_hint)
+        .bind(&protocol.content_type)
+        .bind(&protocol.fields)
+        .bind(&protocol.sample_payload)
+        .bind(protocol.enabled)
+        .bind(protocol.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HsbError::DatabaseError {
+            message: format!("Failed to update custom protocol: {}", e),
+        })?;
+        Ok(())
+    }
+
+    async fn delete_custom_protocol(&self, id: &str) -> HsbResult<()> {
+        sqlx::query("DELETE FROM hsb_custom_protocols WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| HsbError::DatabaseError {
+                message: format!("Failed to delete custom protocol: {}", e),
+            })?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TopicStore for PgStore {
+    async fn create_topic(&self, topic: &StoredTopic) -> HsbResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO hsb_topics (
+                topic, description, owner_system_id, enabled, properties, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(&topic.topic)
+        .bind(&topic.description)
+        .bind(&topic.owner_system_id)
+        .bind(topic.enabled)
+        .bind(self.serialize_json(&topic.properties, "topic.properties")?)
+        .bind(topic.created_at)
+        .bind(topic.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HsbError::DatabaseError {
+            message: format!("Failed to create topic: {}", e),
+        })?;
+        Ok(())
+    }
+
+    async fn get_topic(&self, id: &str) -> HsbResult<Option<StoredTopic>> {
+        let row = sqlx::query(
+            "SELECT topic, description, owner_system_id, enabled, properties, created_at, updated_at FROM hsb_topics WHERE topic = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| HsbError::DatabaseError {
+            message: format!("Failed to load topic: {}", e),
+        })?;
+
+        row.map(|row| self.row_to_stored_topic(row)).transpose()
+    }
+
+    async fn list_topics(&self) -> HsbResult<Vec<StoredTopic>> {
+        let rows = sqlx::query(
+            "SELECT topic, description, owner_system_id, enabled, properties, created_at, updated_at FROM hsb_topics ORDER BY topic ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| HsbError::DatabaseError {
+            message: format!("Failed to list topics: {}", e),
+        })?;
+
+        rows.into_iter()
+            .map(|row| self.row_to_stored_topic(row))
+            .collect()
+    }
+
+    async fn update_topic(&self, id: &str, topic: &StoredTopic) -> HsbResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE hsb_topics
+            SET topic = $2,
+                description = $3,
+                owner_system_id = $4,
+                enabled = $5,
+                properties = $6,
+                updated_at = $7
+            WHERE topic = $1
+            "#,
+        )
+        .bind(id)
+        .bind(&topic.topic)
+        .bind(&topic.description)
+        .bind(&topic.owner_system_id)
+        .bind(topic.enabled)
+        .bind(self.serialize_json(&topic.properties, "topic.properties")?)
+        .bind(topic.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HsbError::DatabaseError {
+            message: format!("Failed to update topic: {}", e),
+        })?;
+        Ok(())
+    }
+
+    async fn delete_topic(&self, id: &str) -> HsbResult<()> {
+        sqlx::query("DELETE FROM hsb_topics WHERE topic = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| HsbError::DatabaseError {
+                message: format!("Failed to delete topic: {}", e),
             })?;
         Ok(())
     }

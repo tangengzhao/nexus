@@ -100,16 +100,19 @@ impl JetStreamManager {
         payload: Bytes,
         msg_id: &str,
     ) -> HsbResult<()> {
+        let msg_id_header = msg_id
+            .parse::<async_nats::HeaderValue>()
+            .map_err(|e| HsbError::InvalidField {
+                field: "msg_id".to_string(),
+                reason: format!("invalid NATS message id header: {}", e),
+            })?;
         let ack = self
             .context
             .publish_with_headers(
                 subject.to_string(),
                 {
                     let mut headers = async_nats::HeaderMap::new();
-                    headers.insert(
-                        "Nats-Msg-Id",
-                        msg_id.parse::<async_nats::HeaderValue>().unwrap(),
-                    );
+                    headers.insert("Nats-Msg-Id", msg_id_header);
                     headers
                 },
                 payload.into(),

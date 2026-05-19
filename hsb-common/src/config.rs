@@ -186,7 +186,7 @@ pub struct SsoClientConfig {
 impl Default for SsoClientConfig {
     fn default() -> Self {
         Self {
-            grpc_endpoint: env_string("RUST_SSO_GRPC_ENDPOINT", "http://rust-sso:50052"),
+            grpc_endpoint: env_string("RUST_SSO_GRPC_ENDPOINT", "http://rust-sso:50051"),
             app_id: "hsb".to_string(),
             app_secret: String::new(),
             tls_enabled: false,

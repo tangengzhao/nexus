@@ -4,12 +4,15 @@ use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
+    body::Body,
+    extract::{DefaultBodyLimit, Query, State},
+    http::{HeaderMap, Request, StatusCode, header::CONTENT_TYPE},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -17,8 +20,8 @@ use tokio::{
     net::TcpListener,
     sync::RwLock,
 };
+use tower_http::timeout::TimeoutLayer;
 use tracing::{error, info, warn};
-use ulid::Ulid;
 
 use hsb_admin::audit::{AuditConfig, InMemoryAuditStorage};
 use hsb_admin::{AdminConfig, AdminServer, AdminState, MessageReplayService};
@@ -31,8 +34,8 @@ use hsb_core::engine::{
     MetricsProcessor, ProcessingPipeline, Router as _, ValidationProcessor,
 };
 use hsb_core::persistence::{
-    EndpointStore, IdempotencyStore, PersistentMessageStore, PgStore, PostgresConfig, RedbStore,
-    RouteStore, WorkflowStore,
+    CustomProtocolStore, EndpointStore, IdempotencyStore, PersistentMessageStore, PgStore,
+    PostgresConfig, RedbStore, RouteStore, TopicStore, WorkflowStore,
 };
 use hsb_core::reliability::{CircuitBreakerConfig, CircuitBreakerRegistry, InMemoryDlq};
 use hsb_core::workflow::{
@@ -52,6 +55,7 @@ const UI_APP_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/ap
 struct HttpAppState {
     route_prefix: String,
     sso_enabled: bool,
+    cookie_secure: bool,
     sso: Option<Arc<SsoWebState>>,
     message_runtime: Arc<MessageIngressRuntime>,
 }
@@ -297,8 +301,9 @@ impl HsbServer {
         let mut handles = Vec::new();
 
         // 启动 Admin API
-        if self.config.http.enabled {
-            let admin_handle = self.start_admin_api().await?;
+        if self.config.http.enabled
+            && let Some(admin_handle) = self.start_admin_api().await?
+        {
             handles.push(admin_handle);
         }
 
@@ -363,9 +368,19 @@ impl HsbServer {
             .map_err(|e| anyhow::anyhow!("Kafka publish failed: {}", e))
     }
 
-    async fn start_admin_api(&self) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    async fn start_admin_api(&self) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+        if self.config.sso.enabled {
+            warn!(
+                "SSO is enabled; standalone Admin API on admin_port is disabled. Use the protected same-port /api/v1 endpoint."
+            );
+            return Ok(None);
+        }
+
         let admin_config = AdminConfig {
-            listen_address: self.config.http.listen_address.clone(),
+            listen_address: admin_listen_address(
+                &self.config.http.listen_address,
+                self.config.sso.enabled,
+            ),
             port: self.config.http.admin_port,
             enable_cors: true,
             api_prefix: join_route_prefix(&self.config.http.route_prefix, "/api/v1"),
@@ -383,7 +398,7 @@ impl HsbServer {
         });
 
         info!("Admin API started on port {}", self.config.http.admin_port);
-        Ok(handle)
+        Ok(Some(handle))
     }
 
     async fn start_http_server(&self) -> anyhow::Result<tokio::task::JoinHandle<()>> {
@@ -393,6 +408,8 @@ impl HsbServer {
         let app_state = self.build_http_app_state()?;
         let route_prefix = app_state.route_prefix.clone();
         let admin_routes = hsb_admin::create_api_routes(Arc::new(self.build_admin_state()));
+        let request_timeout = std::time::Duration::from_secs(self.config.http.request_timeout_secs);
+        let max_body_size = self.config.http.max_body_size;
         let app = Router::new()
             .route("/", get(ui_root))
             .route("/portal", get(home_page))
@@ -406,7 +423,16 @@ impl HsbServer {
             .route("/auth/logout", get(auth_logout))
             .route("/auth/me", get(auth_me))
             .nest_service("/api/v1", admin_routes)
-            .with_state(app_state);
+            .with_state(app_state.clone())
+            .layer(middleware::from_fn_with_state(
+                app_state,
+                require_web_session,
+            ))
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                request_timeout,
+            ))
+            .layer(DefaultBodyLimit::max(max_body_size));
         let app = if route_prefix.is_empty() {
             app
         } else {
@@ -434,6 +460,7 @@ impl HsbServer {
             return Ok(HttpAppState {
                 route_prefix: self.config.http.route_prefix.clone(),
                 sso_enabled: false,
+                cookie_secure: self.config.http.tls_enabled,
                 sso: None,
                 message_runtime: self.message_runtime.clone(),
             });
@@ -450,6 +477,8 @@ impl HsbServer {
         Ok(HttpAppState {
             route_prefix: self.config.http.route_prefix.clone(),
             sso_enabled: true,
+            cookie_secure: self.config.http.tls_enabled
+                || self.config.sso.callback_url.starts_with("https://"),
             sso: Some(Arc::new(SsoWebState {
                 client: Arc::new(client),
                 scope: self.config.sso.scope.clone(),
@@ -475,6 +504,12 @@ impl HsbServer {
             self.endpoint_store
                 .clone()
                 .map(|store| store as Arc<dyn hsb_core::persistence::IntegrationSystemStore>),
+            self.endpoint_store
+                .clone()
+                .map(|store| store as Arc<dyn CustomProtocolStore>),
+            self.endpoint_store
+                .clone()
+                .map(|store| store as Arc<dyn TopicStore>),
             self.endpoint_store
                 .clone()
                 .map(|store| store as Arc<dyn PersistentMessageStore>),
@@ -606,6 +641,7 @@ impl MessageIngressRuntime {
 
         let mut message = match protocol {
             ProtocolType::Http
+            | ProtocolType::Webhook
             | ProtocolType::Custom
             | ProtocolType::OpenAi
             | ProtocolType::Database => build_generic_http_message(
@@ -1021,6 +1057,51 @@ async fn health() -> &'static str {
     "ok"
 }
 
+async fn require_web_session(
+    State(state): State<HttpAppState>,
+    jar: CookieJar,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !state.sso_enabled || is_public_http_path(&state, request.uri().path()) {
+        return next.run(request).await;
+    }
+
+    if current_session_user(&state, &jar).await.is_some() {
+        return next.run(request).await;
+    }
+
+    let app_path = app_relative_path(&state, request.uri().path());
+    if app_path.starts_with("/api/") {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiErrorResponse {
+                error: "认证已过期或未登录".to_string(),
+                code: "UNAUTHORIZED".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    Redirect::to(&route_path(&state, "/auth/login")).into_response()
+}
+
+fn is_public_http_path(state: &HttpAppState, path: &str) -> bool {
+    let app_path = app_relative_path(state, path);
+    app_path == "/health"
+        || app_path == "/api/messages/inbound"
+        || app_path.starts_with("/auth/")
+}
+
+fn app_relative_path<'a>(state: &HttpAppState, path: &'a str) -> &'a str {
+    let prefix = state.route_prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return path;
+    }
+
+    path.strip_prefix(prefix).filter(|value| !value.is_empty()).unwrap_or("/")
+}
+
 async fn ui_root(State(state): State<HttpAppState>) -> impl IntoResponse {
     Redirect::to(&route_path(&state, "/ui/"))
 }
@@ -1083,6 +1164,7 @@ async fn auth_login(State(state): State<HttpAppState>, jar: CookieJar) -> Respon
         STATE_COOKIE_NAME,
         state_value,
         true,
+        state.cookie_secure,
     ));
 
     (jar, Redirect::to(&auth_url)).into_response()
@@ -1136,7 +1218,13 @@ async fn auth_callback(
         }
     };
 
-    let session_id = Ulid::new().to_string();
+    let session_id = match generate_session_id() {
+        Ok(session_id) => session_id,
+        Err(e) => {
+            error!("Failed to generate web session id: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "会话初始化失败").into_response();
+        }
+    };
     let user_name = resolve_user_name(&user);
 
     {
@@ -1153,12 +1241,17 @@ async fn auth_callback(
     info!("User {} logged in through SSO", user_name);
 
     let jar = jar
-        .remove(removal_cookie(&state.route_prefix, STATE_COOKIE_NAME))
+        .remove(removal_cookie(
+            &state.route_prefix,
+            STATE_COOKIE_NAME,
+            state.cookie_secure,
+        ))
         .add(build_cookie(
             &state.route_prefix,
             SESSION_COOKIE_NAME,
             session_id,
             true,
+            state.cookie_secure,
         ));
 
     (jar, Redirect::to(&route_path(&state, "/ui/"))).into_response()
@@ -1183,23 +1276,31 @@ async fn auth_logout(State(state): State<HttpAppState>, jar: CookieJar) -> Respo
                 .map(|session| session.access_token)
         };
 
-        if let Some(access_token) = access_token {
-            if let Err(e) = sso.client.logout(Some(&access_token)).await {
-                warn!("Failed to notify SSO logout: {}", e);
-            }
+        if let Some(access_token) = access_token
+            && let Err(e) = sso.client.logout(Some(&access_token)).await
+        {
+            warn!("Failed to notify SSO logout: {}", e);
         }
     }
 
     let jar = jar
-        .remove(removal_cookie(&state.route_prefix, SESSION_COOKIE_NAME))
-        .remove(removal_cookie(&state.route_prefix, STATE_COOKIE_NAME));
+        .remove(removal_cookie(
+            &state.route_prefix,
+            SESSION_COOKIE_NAME,
+            state.cookie_secure,
+        ))
+        .remove(removal_cookie(
+            &state.route_prefix,
+            STATE_COOKIE_NAME,
+            state.cookie_secure,
+        ));
 
     (jar, Redirect::to(&route_path(&state, "/"))).into_response()
 }
 
 fn render_home_page(user_name: Option<&str>, route_prefix: &str) -> String {
-    let user_name = user_name.unwrap_or("已登录用户");
-    let logout_path = join_route_prefix(route_prefix, "/auth/logout");
+    let user_name = escape_html(user_name.unwrap_or("已登录用户"));
+    let logout_path = escape_html(&join_route_prefix(route_prefix, "/auth/logout"));
 
     format!(
         "<!DOCTYPE html>\
@@ -1229,20 +1330,45 @@ fn render_home_page(user_name: Option<&str>, route_prefix: &str) -> String {
     )
 }
 
-fn build_cookie(route_prefix: &str, name: &str, value: String, http_only: bool) -> Cookie<'static> {
+fn build_cookie(
+    route_prefix: &str,
+    name: &str,
+    value: String,
+    http_only: bool,
+    secure: bool,
+) -> Cookie<'static> {
     Cookie::build((name.to_string(), value))
         .path(cookie_path(route_prefix))
         .http_only(http_only)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .build()
 }
 
-fn removal_cookie(route_prefix: &str, name: &str) -> Cookie<'static> {
+fn removal_cookie(route_prefix: &str, name: &str, secure: bool) -> Cookie<'static> {
     Cookie::build((name.to_string(), String::new()))
         .path(cookie_path(route_prefix))
         .http_only(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .build()
+}
+
+fn generate_session_id() -> HsbResult<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| HsbError::InternalError {
+        message: format!("OS random generator failed: {}", e),
+    })?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 fn render_ui_index(route_prefix: &str) -> String {
@@ -1275,6 +1401,22 @@ fn cookie_path(route_prefix: &str) -> String {
     } else {
         route_prefix.to_string()
     }
+}
+
+fn admin_listen_address(configured: &str, auth_enabled: bool) -> String {
+    if !auth_enabled || is_loopback_listen_address(configured) {
+        return configured.to_string();
+    }
+
+    warn!(
+        "SSO is enabled; binding standalone Admin API to 127.0.0.1 instead of {}",
+        configured
+    );
+    "127.0.0.1".to_string()
+}
+
+fn is_loopback_listen_address(value: &str) -> bool {
+    matches!(value, "127.0.0.1" | "localhost" | "::1")
 }
 
 async fn current_session_user(state: &HttpAppState, jar: &CookieJar) -> Option<String> {
@@ -1625,5 +1767,29 @@ mod tests {
         .expect("protocol should resolve");
 
         assert_eq!(protocol, ProtocolType::Hl7V3);
+    }
+
+    #[test]
+    fn admin_api_binds_loopback_when_auth_is_enabled() {
+        assert_eq!(admin_listen_address("0.0.0.0", true), "127.0.0.1");
+        assert_eq!(admin_listen_address("127.0.0.1", true), "127.0.0.1");
+        assert_eq!(admin_listen_address("0.0.0.0", false), "0.0.0.0");
+    }
+
+    #[test]
+    fn html_escape_prevents_dynamic_content_injection() {
+        assert_eq!(
+            escape_html("<script>alert('x')&\"</script>"),
+            "&lt;script&gt;alert(&#x27;x&#x27;)&amp;&quot;&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn generated_session_ids_are_unguessable_url_safe_tokens() {
+        let first = generate_session_id().expect("session id should be generated");
+        let second = generate_session_id().expect("session id should be generated");
+        assert_ne!(first, second);
+        assert!(first.len() >= 40);
+        assert!(first.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
     }
 }

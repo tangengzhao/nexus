@@ -42,6 +42,8 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 ulid = { workspace = true }
+base64 = "0.22"
+getrandom = "0.3"
 
 # Error handling
 thiserror = { workspace = true }
@@ -50,3 +52,4 @@ anyhow = "1"
 # Tracing
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower-http = { workspace = true, features = ["limit", "timeout"] }

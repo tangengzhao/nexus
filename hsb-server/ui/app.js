@@ -4,6 +4,7 @@ const {
   reactive,
   computed,
   onMounted,
+  onBeforeUnmount,
   watch,
 } = Vue;
 
@@ -68,6 +69,7 @@ const navGroups = [
 
 const protocolOptions = [
   'HTTP',
+  'WEBHOOK',
   'HL7V2',
   'FHIR_R4',
   'FHIR_R5',
@@ -148,6 +150,10 @@ const openAiEndpointOptions = [
   { value: 'embeddings', label: 'Embeddings', path: '/v1/embeddings' },
 ];
 
+const webhookMethodOptions = [
+  { value: 'POST', label: 'POST' },
+];
+
 const routePriorityOptions = [1, 10, 50, 100, 500, 1000];
 
 function optionLabel(options, value) {
@@ -177,6 +183,9 @@ function normalizePath(path) {
 function defaultPortByProtocol(protocol, tlsEnabled = false) {
   const normalized = String(protocol || '').toUpperCase();
   if (normalized === 'HTTP') {
+    return tlsEnabled ? 443 : 80;
+  }
+  if (normalized === 'WEBHOOK') {
     return tlsEnabled ? 443 : 80;
   }
   if (normalized === 'GRPC') {
@@ -254,6 +263,46 @@ async function apiRequest(path, options = {}) {
 
 function createJsonBody(payload) {
   return JSON.stringify(payload);
+}
+
+function generateApiKey() {
+  const cryptoApi = window.crypto || window.msCrypto;
+  if (!cryptoApi?.getRandomValues) {
+    throw new Error('当前浏览器不支持安全随机数生成');
+  }
+
+  const bytes = new Uint8Array(24);
+  cryptoApi.getRandomValues(bytes);
+  let binary = '';
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return window.btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || '').trim();
+  if (!value) {
+    throw new Error('没有可复制的 API Key');
+  }
+
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) {
+    throw new Error('复制失败，请手动复制');
+  }
 }
 
 function buildEndpointSecurity(form) {
@@ -374,6 +423,18 @@ function endpointPayloadFromForm(form) {
     delete properties.model;
     delete properties.organization;
     delete properties.project;
+  }
+
+  if (form.protocol === 'WEBHOOK') {
+    properties.webhook_method = form.webhook_method || 'POST';
+    properties.webhook_event = form.webhook_event || '';
+    properties.signature_header = form.webhook_signature_header || 'X-HSB-Signature';
+    properties.signing_secret_ref = form.webhook_signing_secret_ref || '';
+  } else {
+    delete properties.webhook_method;
+    delete properties.webhook_event;
+    delete properties.signature_header;
+    delete properties.signing_secret_ref;
   }
 
   const payload = {
@@ -571,6 +632,10 @@ function endpointFormFromItem(item = {}) {
     openai_model: item.properties?.model || 'gpt-4o-mini',
     openai_organization: item.properties?.organization || '',
     openai_project: item.properties?.project || '',
+    webhook_method: item.properties?.webhook_method || 'POST',
+    webhook_event: item.properties?.webhook_event || '',
+    webhook_signature_header: item.properties?.signature_header || 'X-HSB-Signature',
+    webhook_signing_secret_ref: item.properties?.signing_secret_ref || '',
     system_type: item.system_type || 'OTHER',
     roles: Array.isArray(item.roles) && item.roles.length ? item.roles : ['CONSUMER'],
     host: connection.host || '',
@@ -926,6 +991,80 @@ function useAsyncResource(loader, initialValue) {
   return { state, refresh };
 }
 
+function normalizeSearch(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function matchesKeyword(item, keyword, fields) {
+  const normalized = normalizeSearch(keyword);
+  if (!normalized) {
+    return true;
+  }
+  return fields
+    .flatMap((field) => {
+      const value = typeof field === 'function' ? field(item) : item?.[field];
+      return Array.isArray(value) ? value : [value];
+    })
+    .filter((value) => value !== undefined && value !== null && value !== '')
+    .join(' ')
+    .toLowerCase()
+    .includes(normalized);
+}
+
+function uniqueValues(items, field) {
+  return Array.from(new Set((items || []).map((item) => item?.[field]).filter(Boolean))).sort();
+}
+
+function usePagedList(items, options = {}) {
+  const currentPage = ref(1);
+  const pageSize = ref(options.defaultPageSize || 10);
+  const rowHeight = options.rowHeight || 46;
+  const minRows = options.minRows || 6;
+  const maxRows = options.maxRows || 18;
+  const minTableHeight = options.minTableHeight || 360;
+  const reservedHeight = options.reservedHeight || 410;
+  const compactReservedHeight = options.compactReservedHeight || 360;
+
+  const total = computed(() => (items.value || []).length);
+  const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
+  const pagedItems = computed(() => {
+    const start = (currentPage.value - 1) * pageSize.value;
+    return (items.value || []).slice(start, start + pageSize.value);
+  });
+  const tableHeight = computed(() => Math.max(minTableHeight, pageSize.value * rowHeight + 48));
+
+  function recalculatePageSize() {
+    const viewportHeight = window.innerHeight || 760;
+    const reserved = viewportHeight < 720 ? compactReservedHeight : reservedHeight;
+    const nextPageSize = Math.max(minRows, Math.min(maxRows, Math.floor((viewportHeight - reserved) / rowHeight)));
+    pageSize.value = nextPageSize;
+    currentPage.value = Math.min(currentPage.value, pageCount.value);
+  }
+
+  function goFirstPage() {
+    currentPage.value = 1;
+  }
+
+  function goLastPage() {
+    currentPage.value = pageCount.value;
+  }
+
+  onMounted(() => {
+    recalculatePageSize();
+    window.addEventListener('resize', recalculatePageSize);
+  });
+
+  onBeforeUnmount(() => {
+    window.removeEventListener('resize', recalculatePageSize);
+  });
+
+  watch([total, pageSize], () => {
+    currentPage.value = Math.min(currentPage.value, pageCount.value);
+  });
+
+  return { currentPage, pageSize, total, pageCount, pagedItems, tableHeight, goFirstPage, goLastPage };
+}
+
 const DashboardPage = {
   name: 'DashboardPage',
   setup() {
@@ -1098,7 +1237,24 @@ const OrganizationsPage = {
     const resource = useAsyncResource(async () => apiRequest('/organizations'), { items: [], total: 0 });
     const drawerVisible = ref(false);
     const submitting = ref(false);
+    const filters = reactive({ keyword: '', organization_type: '', enabled: '' });
     const form = reactive(organizationFormFromItem({}));
+
+    const filteredItems = computed(() => {
+      return (resource.state.value.items || []).filter((item) => {
+        if (filters.organization_type && item.organization_type !== filters.organization_type) {
+          return false;
+        }
+        if (filters.enabled !== '') {
+          const expected = filters.enabled === 'true';
+          if (!!item.enabled !== expected) {
+            return false;
+          }
+        }
+        return matchesKeyword(item, filters.keyword, ['id', 'name', 'description', 'organization_type']);
+      });
+    });
+    const pager = usePagedList(filteredItems);
 
     function resetForm(item = {}) {
       Object.assign(form, organizationFormFromItem(item));
@@ -1170,11 +1326,18 @@ const OrganizationsPage = {
       return (resource.state.value.items || []).filter((item) => item.id !== form.record_id);
     });
 
+    function resetFilters() {
+      Object.assign(filters, { keyword: '', organization_type: '', enabled: '' });
+    }
+
     return {
       ...resource,
+      ...pager,
       drawerVisible,
       submitting,
+      filters,
       form,
+      filteredItems,
       parentNameMap,
       parentOptions,
       organizationTypeOptions,
@@ -1184,6 +1347,7 @@ const OrganizationsPage = {
       openEdit,
       save,
       remove,
+      resetFilters,
     };
   },
   template: `
@@ -1196,13 +1360,33 @@ const OrganizationsPage = {
           </div>
           <div class="toolbar-right">
             <el-button @click="refresh">刷新</el-button>
+            <el-button @click="resetFilters">清空筛选</el-button>
             <el-button type="primary" @click="openCreate">新建机构</el-button>
           </div>
         </div>
 
         <el-alert v-if="state.error" :title="state.error" type="error" show-icon :closable="false" style="margin-bottom: 16px;" />
 
-        <el-table :data="state.value.items || []" stripe v-loading="state.loading">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
+            <el-form-item label="搜索">
+              <el-input v-model="filters.keyword" placeholder="输入机构名称、ID 或描述" clearable />
+            </el-form-item>
+            <el-form-item label="机构类型">
+              <el-select v-model="filters.organization_type" clearable placeholder="全部类型">
+                <el-option v-for="item in organizationTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="启用状态">
+              <el-select v-model="filters.enabled" clearable placeholder="全部状态">
+                <el-option label="启用" value="true" />
+                <el-option label="停用" value="false" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </div>
+
+        <el-table :data="pagedItems" stripe v-loading="state.loading" row-key="id" class="list-table" :height="tableHeight">
           <el-table-column prop="name" label="机构名称" min-width="180" />
           <el-table-column prop="id" label="机构ID" min-width="180" />
           <el-table-column label="机构类型" width="160">
@@ -1228,6 +1412,12 @@ const OrganizationsPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="total > 0">
+          <el-button @click="goFirstPage" :disabled="currentPage <= 1">首页</el-button>
+          <el-pagination v-model:current-page="currentPage" background layout="pager" :page-size="pageSize" :pager-count="7" :total="total" />
+          <el-button @click="goLastPage" :disabled="currentPage >= pageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ pageSize }} 行 / 共 {{ total }} 条</span>
+        </div>
       </div>
 
       <el-drawer v-model="drawerVisible" :title="form.record_id ? '编辑机构' : '新建机构'" size="560px">
@@ -1272,6 +1462,7 @@ const SystemsPage = {
     const organizationResource = useAsyncResource(async () => apiRequest('/organizations'), { items: [], total: 0 });
     const drawerVisible = ref(false);
     const submitting = ref(false);
+    const filters = reactive({ keyword: '', organization_id: '', system_type: '', enabled: '' });
     const form = reactive(systemFormFromItem({}));
 
     function resetForm(item = {}) {
@@ -1345,12 +1536,46 @@ const SystemsPage = {
       return map;
     });
 
+    const filteredItems = computed(() => {
+      return (resource.state.value.items || []).filter((item) => {
+        if (filters.organization_id && item.organization_id !== filters.organization_id) {
+          return false;
+        }
+        if (filters.system_type && item.system_type !== filters.system_type) {
+          return false;
+        }
+        if (filters.enabled !== '') {
+          const expected = filters.enabled === 'true';
+          if (!!item.enabled !== expected) {
+            return false;
+          }
+        }
+        return matchesKeyword(item, filters.keyword, [
+          'id',
+          'name',
+          'description',
+          'system_type',
+          'topic_namespace',
+          'topic_prefix',
+          (value) => organizationNameMap.value.get(value.organization_id),
+        ]);
+      });
+    });
+    const pager = usePagedList(filteredItems);
+
+    function resetFilters() {
+      Object.assign(filters, { keyword: '', organization_id: '', system_type: '', enabled: '' });
+    }
+
     return {
       ...resource,
+      ...pager,
       organizationResource,
       drawerVisible,
       submitting,
+      filters,
       form,
+      filteredItems,
       organizationNameMap,
       systemTypeOptions,
       formatTime,
@@ -1358,6 +1583,7 @@ const SystemsPage = {
       openEdit,
       save,
       remove,
+      resetFilters,
     };
   },
   template: `
@@ -1370,13 +1596,38 @@ const SystemsPage = {
           </div>
           <div class="toolbar-right">
             <el-button @click="refresh">刷新</el-button>
+            <el-button @click="resetFilters">清空筛选</el-button>
             <el-button type="primary" @click="openCreate">新建系统</el-button>
           </div>
         </div>
 
         <el-alert v-if="state.error" :title="state.error" type="error" show-icon :closable="false" style="margin-bottom: 16px;" />
 
-        <el-table :data="state.value.items || []" stripe v-loading="state.loading || organizationResource.state.loading">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
+            <el-form-item label="搜索">
+              <el-input v-model="filters.keyword" placeholder="输入系统名称、ID、机构或 Topic 约定" clearable />
+            </el-form-item>
+            <el-form-item label="所属机构">
+              <el-select v-model="filters.organization_id" filterable clearable placeholder="全部机构">
+                <el-option v-for="item in organizationResource.state.value.items || []" :key="item.id" :label="item.name" :value="item.id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="系统类型">
+              <el-select v-model="filters.system_type" clearable placeholder="全部类型">
+                <el-option v-for="item in systemTypeOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="启用状态">
+              <el-select v-model="filters.enabled" clearable placeholder="全部状态">
+                <el-option label="启用" value="true" />
+                <el-option label="停用" value="false" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </div>
+
+        <el-table :data="pagedItems" stripe v-loading="state.loading || organizationResource.state.loading" row-key="id" class="list-table" :height="tableHeight">
           <el-table-column prop="name" label="系统名称" min-width="180" />
           <el-table-column prop="id" label="系统ID" min-width="180" />
           <el-table-column label="所属机构" min-width="180">
@@ -1403,6 +1654,12 @@ const SystemsPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="total > 0">
+          <el-button @click="goFirstPage" :disabled="currentPage <= 1">首页</el-button>
+          <el-pagination v-model:current-page="currentPage" background layout="pager" :page-size="pageSize" :pager-count="7" :total="total" />
+          <el-button @click="goLastPage" :disabled="currentPage >= pageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ pageSize }} 行 / 共 {{ total }} 条</span>
+        </div>
       </div>
 
       <el-drawer v-model="drawerVisible" :title="form.record_id ? '编辑系统' : '新建系统'" size="620px">
@@ -1593,6 +1850,24 @@ const EndpointsPage = {
       selectedVersion.value = item || null;
     }
 
+    function fillGeneratedApiKey(fieldName) {
+      try {
+        form[fieldName] = generateApiKey();
+        ElMessage.success('API Key 已生成');
+      } catch (error) {
+        ElMessage.error(error.message || '生成 API Key 失败');
+      }
+    }
+
+    async function copyApiKey(fieldName) {
+      try {
+        await copyTextToClipboard(form[fieldName]);
+        ElMessage.success('已复制');
+      } catch (error) {
+        ElMessage.error(error.message || '复制失败');
+      }
+    }
+
     onMounted(async () => {
       await Promise.all([
         resource.refresh(),
@@ -1671,6 +1946,7 @@ const EndpointsPage = {
         return haystack.includes(keyword);
       });
     });
+    const pager = usePagedList(filteredItems, { reservedHeight: 470, compactReservedHeight: 410 });
 
     watch(() => form.organization_id, (organizationId) => {
       if (!form.system_id) {
@@ -1706,6 +1982,10 @@ const EndpointsPage = {
         if (form.auth_type === 'none') {
           form.auth_type = 'bearer';
         }
+      }
+      if (protocol === 'WEBHOOK') {
+        form.port = defaultPortByProtocol(protocol, form.tls_enabled);
+        form.path = form.path || '/webhook';
       }
     });
 
@@ -1744,6 +2024,7 @@ const EndpointsPage = {
 
     return {
       ...resource,
+      ...pager,
       organizationResource,
       systemResource,
       customProtocolResource,
@@ -1770,6 +2051,7 @@ const EndpointsPage = {
       authTypeOptions,
       databaseTypeOptions,
       openAiEndpointOptions,
+      webhookMethodOptions,
       organizationNameMap,
       systemNameMap,
       systemTypeMap,
@@ -1784,6 +2066,8 @@ const EndpointsPage = {
       openDetail,
       openVersions,
       selectVersion,
+      fillGeneratedApiKey,
+      copyApiKey,
       save,
       remove,
       checkHealth,
@@ -1809,7 +2093,8 @@ const EndpointsPage = {
 
         <el-alert v-if="state.error" :title="state.error" type="error" show-icon :closable="false" style="margin-bottom: 16px;" />
 
-        <div class="filters-grid" style="margin-bottom: 16px;">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
           <el-form-item label="关键字">
             <el-input v-model="filters.keyword" placeholder="搜索名称、ID、机构、系统、地址" clearable />
           </el-form-item>
@@ -1844,9 +2129,10 @@ const EndpointsPage = {
               <el-option label="停用" value="false" />
             </el-select>
           </el-form-item>
+          </div>
         </div>
 
-        <el-table :data="filteredItems" stripe v-loading="state.loading || organizationResource.state.loading || systemResource.state.loading">
+        <el-table :data="pagedItems" stripe v-loading="state.loading || organizationResource.state.loading || systemResource.state.loading" row-key="id" class="list-table" :height="tableHeight">
           <el-table-column prop="name" label="名称" min-width="180" />
           <el-table-column label="所属机构" min-width="160">
             <template #default="scope">{{ organizationNameMap.get(scope.row.organization_id) || scope.row.organization_id || '-' }}</template>
@@ -1885,6 +2171,12 @@ const EndpointsPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="total > 0">
+          <el-button @click="goFirstPage" :disabled="currentPage <= 1">首页</el-button>
+          <el-pagination v-model:current-page="currentPage" background layout="pager" :page-size="pageSize" :pager-count="7" :total="total" />
+          <el-button @click="goLastPage" :disabled="currentPage >= pageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ pageSize }} 行 / 共 {{ total }} 条</span>
+        </div>
       </div>
 
       <el-drawer v-model="drawerVisible" :title="form.record_id ? '编辑端点' : '新建端点'" size="820px">
@@ -1937,6 +2229,11 @@ const EndpointsPage = {
                 <el-option v-for="item in openAiEndpointOptions" :key="item.value" :label="item.label" :value="item.value" />
               </el-select>
             </el-form-item>
+            <el-form-item v-if="form.protocol === 'WEBHOOK'" label="Webhook 方法">
+              <el-select v-model="form.webhook_method">
+                <el-option v-for="item in webhookMethodOptions" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="系统类型">
               <el-input v-model="form.system_type" disabled />
             </el-form-item>
@@ -1968,6 +2265,19 @@ const EndpointsPage = {
             <el-form-item label="默认模型"><el-input v-model="form.openai_model" placeholder="gpt-4o-mini" /></el-form-item>
             <el-form-item label="Organization"><el-input v-model="form.openai_organization" placeholder="可选" /></el-form-item>
             <el-form-item label="Project"><el-input v-model="form.openai_project" placeholder="可选" /></el-form-item>
+          </div>
+
+          <div class="filters-grid" v-if="form.protocol === 'WEBHOOK'">
+            <el-form-item label="事件类型"><el-input v-model="form.webhook_event" placeholder="patient.admit、order.created 等" /></el-form-item>
+            <el-form-item label="签名 Header"><el-input v-model="form.webhook_signature_header" placeholder="X-HSB-Signature" /></el-form-item>
+            <el-form-item label="签名密钥引用">
+              <el-input v-model="form.webhook_signing_secret_ref" class="api-key-input" placeholder="secret/webhook/lis-main，可选">
+                <template #append>
+                  <el-button @click="fillGeneratedApiKey('webhook_signing_secret_ref')">随机生成api-key</el-button>
+                  <el-button @click="copyApiKey('webhook_signing_secret_ref')">复制</el-button>
+                </template>
+              </el-input>
+            </el-form-item>
           </div>
 
           <div class="filters-grid">
@@ -2010,7 +2320,14 @@ const EndpointsPage = {
                 <el-option v-for="item in authTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
               </el-select>
             </el-form-item>
-            <el-form-item label="密钥引用"><el-input v-model="form.security_secret_ref" placeholder="vault://hsb/endpoints/demo" /></el-form-item>
+            <el-form-item label="密钥引用">
+              <el-input v-model="form.security_secret_ref" class="api-key-input" placeholder="vault://hsb/endpoints/demo">
+                <template #append>
+                  <el-button @click="fillGeneratedApiKey('security_secret_ref')">随机生成api-key</el-button>
+                  <el-button @click="copyApiKey('security_secret_ref')">复制</el-button>
+                </template>
+              </el-input>
+            </el-form-item>
             <el-form-item label="加密算法">
               <el-select v-model="form.security_encryption_algorithm">
                 <el-option v-for="item in endpointEncryptionOptions" :key="item.value" :label="item.label" :value="item.value" />
@@ -2049,7 +2366,14 @@ const EndpointsPage = {
           </div>
           <div class="filters-grid" v-if="form.auth_type === 'api_key'">
             <el-form-item label="Header 名称"><el-input v-model="form.auth_header_name" placeholder="X-API-Key" /></el-form-item>
-            <el-form-item label="密钥"><el-input v-model="form.auth_api_secret" type="password" show-password placeholder="编辑时留空表示不变" /></el-form-item>
+            <el-form-item label="API Key">
+              <el-input v-model="form.auth_api_secret" class="api-key-input" type="password" show-password placeholder="编辑时留空表示不变">
+                <template #append>
+                  <el-button @click="fillGeneratedApiKey('auth_api_secret')">随机生成api-key</el-button>
+                  <el-button @click="copyApiKey('auth_api_secret')">复制</el-button>
+                </template>
+              </el-input>
+            </el-form-item>
           </div>
 
           <div class="filters-grid">
@@ -2169,7 +2493,29 @@ const CustomProtocolsPage = {
     const resource = useAsyncResource(async () => apiRequest('/custom-protocols'), { items: [], total: 0 });
     const drawerVisible = ref(false);
     const submitting = ref(false);
+    const filters = reactive({ keyword: '', transport_hint: '', content_type: '', enabled: '' });
     const form = reactive(customProtocolFormFromItem({}));
+
+    const transportHintOptions = computed(() => uniqueValues(resource.state.value.items || [], 'transport_hint'));
+    const contentTypeOptions = computed(() => uniqueValues(resource.state.value.items || [], 'content_type'));
+    const filteredItems = computed(() => {
+      return (resource.state.value.items || []).filter((item) => {
+        if (filters.transport_hint && item.transport_hint !== filters.transport_hint) {
+          return false;
+        }
+        if (filters.content_type && item.content_type !== filters.content_type) {
+          return false;
+        }
+        if (filters.enabled !== '') {
+          const expected = filters.enabled === 'true';
+          if (!!item.enabled !== expected) {
+            return false;
+          }
+        }
+        return matchesKeyword(item, filters.keyword, ['id', 'name', 'description', 'transport_hint', 'content_type']);
+      });
+    });
+    const pager = usePagedList(filteredItems);
 
     function resetForm(item = {}) {
       Object.assign(form, customProtocolFormFromItem(item));
@@ -2229,15 +2575,25 @@ const CustomProtocolsPage = {
 
     onMounted(resource.refresh);
 
+    function resetFilters() {
+      Object.assign(filters, { keyword: '', transport_hint: '', content_type: '', enabled: '' });
+    }
+
     return {
       ...resource,
+      ...pager,
       drawerVisible,
       submitting,
+      filters,
       form,
+      transportHintOptions,
+      contentTypeOptions,
+      filteredItems,
       openCreate,
       openEdit,
       save,
       remove,
+      resetFilters,
       stringifyPretty,
       formatTime,
     };
@@ -2252,11 +2608,35 @@ const CustomProtocolsPage = {
           </div>
           <div class="toolbar-right">
             <el-button @click="refresh">刷新</el-button>
+            <el-button @click="resetFilters">清空筛选</el-button>
             <el-button type="primary" @click="openCreate">新建协议</el-button>
           </div>
         </div>
         <el-alert v-if="state.error" :title="state.error" type="error" show-icon :closable="false" style="margin-bottom: 16px;" />
-        <el-table :data="state.value.items || []" stripe v-loading="state.loading">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
+            <el-form-item label="搜索">
+              <el-input v-model="filters.keyword" placeholder="输入协议名称、ID 或描述" clearable />
+            </el-form-item>
+            <el-form-item label="传输提示">
+              <el-select v-model="filters.transport_hint" clearable placeholder="全部传输">
+                <el-option v-for="item in transportHintOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="Content-Type">
+              <el-select v-model="filters.content_type" clearable placeholder="全部类型">
+                <el-option v-for="item in contentTypeOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="启用状态">
+              <el-select v-model="filters.enabled" clearable placeholder="全部状态">
+                <el-option label="启用" value="true" />
+                <el-option label="停用" value="false" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </div>
+        <el-table :data="pagedItems" stripe v-loading="state.loading" row-key="id" class="list-table" :height="tableHeight">
           <el-table-column prop="id" label="协议ID" min-width="180" />
           <el-table-column prop="name" label="名称" min-width="180" />
           <el-table-column prop="transport_hint" label="传输提示" width="140" />
@@ -2271,6 +2651,12 @@ const CustomProtocolsPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="total > 0">
+          <el-button @click="goFirstPage" :disabled="currentPage <= 1">首页</el-button>
+          <el-pagination v-model:current-page="currentPage" background layout="pager" :page-size="pageSize" :pager-count="7" :total="total" />
+          <el-button @click="goLastPage" :disabled="currentPage >= pageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ pageSize }} 行 / 共 {{ total }} 条</span>
+        </div>
       </div>
 
       <el-drawer v-model="drawerVisible" :title="form.id ? '编辑自定义协议' : '新建自定义协议'" size="820px">
@@ -2278,13 +2664,22 @@ const CustomProtocolsPage = {
           <div class="filters-grid">
             <el-form-item v-if="!form.id" label="协议ID"><el-input v-model="form.requested_id" placeholder="可选，留空则自动生成" /></el-form-item>
             <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
-            <el-form-item label="传输提示"><el-input v-model="form.transport_hint" placeholder="HTTP、TCP、MQ 等" /></el-form-item>
+            <el-form-item label="传输提示">
+              <el-select v-model="form.transport_hint" placeholder="请选择传输类型" allow-create filterable clearable style="width:100%">
+                <el-option label="HTTP" value="http" />
+                <el-option label="TCP / MLLP" value="tcp" />
+                <el-option label="MQ (AMQP)" value="mq" />
+                <el-option label="Kafka" value="kafka" />
+                <el-option label="NATS" value="nats" />
+                <el-option label="gRPC" value="grpc" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="Content-Type"><el-input v-model="form.content_type" placeholder="application/json" /></el-form-item>
             <el-form-item label="启用状态"><el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" /></el-form-item>
           </div>
           <el-form-item label="描述"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item>
-          <el-form-item label="字段定义 JSON" class="code-block"><el-input v-model="form.fieldsText" type="textarea" /></el-form-item>
-          <el-form-item label="样例报文 JSON" class="code-block"><el-input v-model="form.samplePayloadText" type="textarea" /></el-form-item>
+          <el-form-item label="字段定义 JSON" class="code-block"><el-input v-model="form.fieldsText" type="textarea" :rows="14" /></el-form-item>
+          <el-form-item label="样例报文 JSON" class="code-block"><el-input v-model="form.samplePayloadText" type="textarea" :rows="10" /></el-form-item>
         </el-form>
         <template #footer>
           <div class="header-actions">
@@ -2304,7 +2699,49 @@ const TopicsPage = {
     const systemResource = useAsyncResource(async () => apiRequest('/systems'), { items: [], total: 0 });
     const drawerVisible = ref(false);
     const submitting = ref(false);
+    const filters = reactive({ keyword: '', domain: '', service: '', owner_system_id: '', enabled: '' });
     const form = reactive(topicFormFromItem({}));
+
+    const topicItems = computed(() => resource.state.value.items || []);
+    const domainOptions = computed(() => uniqueValues(topicItems.value, 'domain'));
+    const serviceOptions = computed(() => uniqueValues(
+      topicItems.value.filter((item) => !filters.domain || item.domain === filters.domain),
+      'service',
+    ));
+    const systemNameMap = computed(() => {
+      const map = new Map();
+      (systemResource.state.value.items || []).forEach((item) => map.set(item.id, item.name || item.id));
+      return map;
+    });
+    const filteredItems = computed(() => {
+      return topicItems.value.filter((item) => {
+        if (filters.domain && item.domain !== filters.domain) {
+          return false;
+        }
+        if (filters.service && item.service !== filters.service) {
+          return false;
+        }
+        if (filters.owner_system_id && item.owner_system_id !== filters.owner_system_id) {
+          return false;
+        }
+        if (filters.enabled !== '') {
+          const expected = filters.enabled === 'true';
+          if (!!item.enabled !== expected) {
+            return false;
+          }
+        }
+        return matchesKeyword(item, filters.keyword, [
+          'topic',
+          'description',
+          'domain',
+          'service',
+          'action',
+          'version',
+          (value) => systemNameMap.value.get(value.owner_system_id),
+        ]);
+      });
+    });
+    const pager = usePagedList(filteredItems);
 
     function resetForm(item = {}) {
       Object.assign(form, topicFormFromItem(item));
@@ -2365,16 +2802,31 @@ const TopicsPage = {
       await Promise.all([resource.refresh(), systemResource.refresh()]);
     });
 
+    watch(() => filters.domain, () => {
+      filters.service = '';
+    });
+
+    function resetFilters() {
+      Object.assign(filters, { keyword: '', domain: '', service: '', owner_system_id: '', enabled: '' });
+    }
+
     return {
       ...resource,
+      ...pager,
       systemResource,
       drawerVisible,
       submitting,
+      filters,
+      domainOptions,
+      serviceOptions,
+      systemNameMap,
+      filteredItems,
       form,
       openCreate,
       openEdit,
       save,
       remove,
+      resetFilters,
       formatTime,
     };
   },
@@ -2388,12 +2840,44 @@ const TopicsPage = {
           </div>
           <div class="toolbar-right">
             <el-button @click="refresh">刷新</el-button>
+            <el-button @click="resetFilters">清空筛选</el-button>
             <el-button type="primary" @click="openCreate">新建 Topic</el-button>
           </div>
         </div>
         <el-alert v-if="state.error" :title="state.error" type="error" show-icon :closable="false" style="margin-bottom: 16px;" />
-        <el-table :data="state.value.items || []" stripe v-loading="state.loading">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
+            <el-form-item label="搜索">
+              <el-input v-model="filters.keyword" placeholder="输入 Topic 名、说明、Action" clearable />
+            </el-form-item>
+            <el-form-item label="Domain">
+              <el-select v-model="filters.domain" clearable placeholder="全部 Domain">
+                <el-option v-for="item in domainOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="Service">
+              <el-select v-model="filters.service" clearable placeholder="全部 Service">
+                <el-option v-for="item in serviceOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="归属系统">
+              <el-select v-model="filters.owner_system_id" filterable clearable placeholder="全部系统">
+                <el-option v-for="item in systemResource.state.value.items || []" :key="item.id" :label="item.name" :value="item.id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="启用状态">
+              <el-select v-model="filters.enabled" clearable placeholder="全部状态">
+                <el-option label="启用" value="true" />
+                <el-option label="停用" value="false" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </div>
+        <el-table :data="pagedItems" stripe v-loading="state.loading" row-key="id" class="list-table topic-table" :height="tableHeight">
           <el-table-column prop="topic" label="Topic" min-width="240" />
+          <el-table-column label="说明" min-width="360" show-overflow-tooltip>
+            <template #default="scope"><span class="topic-description">{{ scope.row.description || '-' }}</span></template>
+          </el-table-column>
           <el-table-column prop="domain" label="Domain" width="120" />
           <el-table-column prop="service" label="Service" width="140" />
           <el-table-column prop="action" label="Action" width="140" />
@@ -2407,6 +2891,19 @@ const TopicsPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="total > 0">
+          <el-button @click="goFirstPage" :disabled="currentPage <= 1">首页</el-button>
+          <el-pagination
+            v-model:current-page="currentPage"
+            background
+            layout="pager"
+            :page-size="pageSize"
+            :pager-count="7"
+            :total="total"
+          />
+          <el-button @click="goLastPage" :disabled="currentPage >= pageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ pageSize }} 行 / 共 {{ total }} 条</span>
+        </div>
       </div>
 
       <el-drawer v-model="drawerVisible" :title="form.id ? '编辑 Topic' : '新建 Topic'" size="720px">
@@ -2441,6 +2938,7 @@ const RoutesPage = {
     const endpointResource = useAsyncResource(async () => apiRequest('/endpoints'), { items: [], total: 0 });
     const drawerVisible = ref(false);
     const submitting = ref(false);
+    const filters = reactive({ keyword: '', system_type: '', protocol: '', enabled: '' });
     const form = reactive(routeFormFromItem({}));
 
     function resetForm(item = {}) {
@@ -2519,21 +3017,56 @@ const RoutesPage = {
       return map;
     });
 
+    const filteredItems = computed(() => {
+      return (resource.state.value.items || []).filter((item) => {
+        if (filters.system_type && item.source?.system_type !== filters.system_type) {
+          return false;
+        }
+        if (filters.protocol && item.source?.protocol !== filters.protocol) {
+          return false;
+        }
+        if (filters.enabled !== '') {
+          const expected = filters.enabled === 'true';
+          if (!!item.enabled !== expected) {
+            return false;
+          }
+        }
+        return matchesKeyword(item, filters.keyword, [
+          'id',
+          'name',
+          'description',
+          (value) => value.source?.endpoint_id,
+          (value) => value.source?.pattern,
+          (value) => value.source?.message_type,
+          (value) => (value.targets || []).map((target) => [target.endpoint_id, endpointNames.value.get(target.endpoint_id)]),
+        ]);
+      });
+    });
+    const pager = usePagedList(filteredItems);
+
+    function resetFilters() {
+      Object.assign(filters, { keyword: '', system_type: '', protocol: '', enabled: '' });
+    }
+
     return {
       ...resource,
+      ...pager,
       endpointResource,
       drawerVisible,
       submitting,
+      filters,
       form,
       protocolOptions,
       systemTypeOptions,
       routePriorityOptions,
       endpointNames,
+      filteredItems,
       openCreate,
       openEdit,
       save,
       toggleRoute,
       remove,
+      resetFilters,
     };
   },
   template: `
@@ -2546,11 +3079,36 @@ const RoutesPage = {
           </div>
           <div class="toolbar-right">
             <el-button @click="refresh">刷新</el-button>
+            <el-button @click="resetFilters">清空筛选</el-button>
             <el-button type="primary" @click="openCreate">新建路由</el-button>
           </div>
         </div>
 
-        <el-table :data="state.value.items || []" stripe v-loading="state.loading">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
+            <el-form-item label="搜索">
+              <el-input v-model="filters.keyword" placeholder="输入路由名称、ID、来源或目标端点" clearable />
+            </el-form-item>
+            <el-form-item label="来源系统类型">
+              <el-select v-model="filters.system_type" clearable placeholder="全部类型">
+                <el-option v-for="item in systemTypeOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="协议">
+              <el-select v-model="filters.protocol" clearable placeholder="全部协议">
+                <el-option v-for="item in protocolOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="启用状态">
+              <el-select v-model="filters.enabled" clearable placeholder="全部状态">
+                <el-option label="启用" value="true" />
+                <el-option label="停用" value="false" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </div>
+
+        <el-table :data="pagedItems" stripe v-loading="state.loading" row-key="id" class="list-table" :height="tableHeight">
           <el-table-column prop="name" label="名称" min-width="180" />
           <el-table-column prop="priority" label="优先级" width="100" />
           <el-table-column label="来源" min-width="180">
@@ -2583,6 +3141,12 @@ const RoutesPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="total > 0">
+          <el-button @click="goFirstPage" :disabled="currentPage <= 1">首页</el-button>
+          <el-pagination v-model:current-page="currentPage" background layout="pager" :page-size="pageSize" :pager-count="7" :total="total" />
+          <el-button @click="goLastPage" :disabled="currentPage >= pageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ pageSize }} 行 / 共 {{ total }} 条</span>
+        </div>
       </div>
 
       <el-drawer v-model="drawerVisible" :title="form.id ? '编辑路由' : '新建路由'" size="720px">
@@ -2624,6 +3188,7 @@ const MessagesPage = {
     const detailVisible = ref(false);
     const detail = ref(null);
     const replayLoadingId = ref('');
+    const pageCount = computed(() => Math.max(1, Math.ceil((resource.state.value.total || 0) / filters.page_size)));
 
     async function openDetail(item) {
       try {
@@ -2647,17 +3212,31 @@ const MessagesPage = {
       }
     }
 
+    function goFirstPage() {
+      filters.page = 1;
+    }
+
+    function goLastPage() {
+      filters.page = pageCount.value;
+    }
+
     watch(() => ({ ...filters }), resource.refresh, { deep: true });
+    watch(() => [filters.status, filters.protocol, filters.page_size], () => {
+      filters.page = 1;
+    });
     onMounted(resource.refresh);
 
     return {
       filters,
       ...resource,
+      pageCount,
       detailVisible,
       detail,
       replayLoadingId,
       openDetail,
       reprocess,
+      goFirstPage,
+      goLastPage,
       formatTime,
       humanizeState,
       tagTypeByState,
@@ -2676,7 +3255,8 @@ const MessagesPage = {
           </div>
         </div>
 
-        <div class="filters-grid">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
           <el-form-item label="状态">
             <el-input v-model="filters.status" placeholder="pending / processed / failed" />
           </el-form-item>
@@ -2688,9 +3268,10 @@ const MessagesPage = {
           <el-form-item label="每页数量">
             <el-input-number v-model="filters.page_size" :min="10" :max="100" style="width: 100%;" />
           </el-form-item>
+          </div>
         </div>
 
-        <el-table :data="state.value.items || []" stripe v-loading="state.loading">
+        <el-table :data="state.value.items || []" stripe v-loading="state.loading" row-key="id" class="list-table">
           <el-table-column prop="id" label="消息ID" min-width="220" />
           <el-table-column prop="protocol" label="协议" width="120" />
           <el-table-column prop="message_type" label="消息类型" width="150" />
@@ -2711,6 +3292,12 @@ const MessagesPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="state.value.total > 0">
+          <el-button @click="goFirstPage" :disabled="filters.page <= 1">首页</el-button>
+          <el-pagination v-model:current-page="filters.page" background layout="pager" :page-size="filters.page_size" :pager-count="7" :total="state.value.total || 0" />
+          <el-button @click="goLastPage" :disabled="filters.page >= pageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ filters.page_size }} 行 / 共 {{ state.value.total || 0 }} 条</span>
+        </div>
       </div>
 
       <el-dialog v-model="detailVisible" title="消息详情" width="900px">
@@ -2738,6 +3325,18 @@ const DlqPage = {
   setup() {
     const resource = useAsyncResource(async () => apiRequest('/dlq'), { items: [], total: 0 });
     const actionLoadingId = ref('');
+    const filters = reactive({ keyword: '', reason: '' });
+
+    const reasonOptions = computed(() => uniqueValues(resource.state.value.items || [], 'reason'));
+    const filteredItems = computed(() => {
+      return (resource.state.value.items || []).filter((item) => {
+        if (filters.reason && item.reason !== filters.reason) {
+          return false;
+        }
+        return matchesKeyword(item, filters.keyword, ['id', 'message_id', 'reason', 'error_detail']);
+      });
+    });
+    const pager = usePagedList(filteredItems, { minTableHeight: 300 });
 
     async function reprocess(item) {
       try {
@@ -2769,11 +3368,18 @@ const DlqPage = {
 
     return {
       ...resource,
+      ...pager,
       actionLoadingId,
+      filters,
+      reasonOptions,
+      filteredItems,
       formatTime,
       humanizeState,
       reprocess,
       remove,
+      resetFilters() {
+        Object.assign(filters, { keyword: '', reason: '' });
+      },
     };
   },
   template: `
@@ -2784,9 +3390,24 @@ const DlqPage = {
             <h2 class="page-section-title">死信队列</h2>
             <p class="page-section-subtitle">集中处理无法自动恢复的消息。支持再次投递和人工删除，便于快速收敛积压。</p>
           </div>
-          <el-button @click="refresh">刷新</el-button>
+          <div class="toolbar-right">
+            <el-button @click="refresh">刷新</el-button>
+            <el-button @click="resetFilters">清空筛选</el-button>
+          </div>
         </div>
-        <el-table :data="state.value.items || []" stripe v-loading="state.loading">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
+            <el-form-item label="搜索">
+              <el-input v-model="filters.keyword" placeholder="输入死信 ID、原消息 ID 或失败原因" clearable />
+            </el-form-item>
+            <el-form-item label="失败原因">
+              <el-select v-model="filters.reason" clearable placeholder="全部原因">
+                <el-option v-for="item in reasonOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </div>
+        <el-table :data="pagedItems" stripe v-loading="state.loading" row-key="id" class="list-table" :height="tableHeight">
           <el-table-column prop="id" label="死信ID" min-width="220" />
           <el-table-column prop="message_id" label="原消息ID" min-width="220" />
           <el-table-column prop="reason" label="失败原因" min-width="240" />
@@ -2802,6 +3423,12 @@ const DlqPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="total > 0">
+          <el-button @click="goFirstPage" :disabled="currentPage <= 1">首页</el-button>
+          <el-pagination v-model:current-page="currentPage" background layout="pager" :page-size="pageSize" :pager-count="7" :total="total" />
+          <el-button @click="goLastPage" :disabled="currentPage >= pageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ pageSize }} 行 / 共 {{ total }} 条</span>
+        </div>
       </div>
     </div>
   `,
@@ -2872,6 +3499,8 @@ const WorkflowsPage = {
     const submitting = ref(false);
     const startSubmitting = ref(false);
     const instanceActionId = ref('');
+    const filters = reactive({ keyword: '', enabled: '', step_type: '' });
+    const instanceFilters = reactive({ keyword: '', status: '' });
     const form = reactive(defaultWorkflowForm());
     const startForm = reactive(defaultWorkflowStartForm());
     const instanceDetail = ref(null);
@@ -3004,6 +3633,55 @@ const WorkflowsPage = {
       await Promise.all([refreshAll(), customProtocolResource.refresh()]);
     });
 
+    const stepTypeOptions = computed(() => {
+      return uniqueValues(
+        (resource.state.value.items || []).flatMap((item) => item.steps || []).map((step) => ({ type: workflowStepType(step) })),
+        'type',
+      );
+    });
+
+    const instanceStatusOptions = computed(() => uniqueValues(instanceResource.state.value.items || [], 'status'));
+
+    const filteredItems = computed(() => {
+      return (resource.state.value.items || []).filter((item) => {
+        if (filters.enabled !== '') {
+          const expected = filters.enabled === 'true';
+          if (!!item.enabled !== expected) {
+            return false;
+          }
+        }
+        if (filters.step_type && !(item.steps || []).some((step) => workflowStepType(step) === filters.step_type)) {
+          return false;
+        }
+        return matchesKeyword(item, filters.keyword, [
+          'id',
+          'name',
+          'description',
+          (value) => (value.steps || []).map((step) => [step.id, step.name, workflowStepType(step)]),
+        ]);
+      });
+    });
+
+    const filteredInstances = computed(() => {
+      return (instanceResource.state.value.items || []).filter((item) => {
+        if (instanceFilters.status && item.status !== instanceFilters.status) {
+          return false;
+        }
+        return matchesKeyword(item, instanceFilters.keyword, ['id', 'workflow_id', 'current_step_id', 'status']);
+      });
+    });
+
+    const workflowPager = usePagedList(filteredItems, { reservedHeight: 470, compactReservedHeight: 410 });
+    const instancePager = usePagedList(filteredInstances, { reservedHeight: 430, compactReservedHeight: 390, minTableHeight: 300 });
+
+    function resetFilters() {
+      Object.assign(filters, { keyword: '', enabled: '', step_type: '' });
+    }
+
+    function resetInstanceFilters() {
+      Object.assign(instanceFilters, { keyword: '', status: '' });
+    }
+
     return {
       ...resource,
       instanceResource,
@@ -3014,9 +3692,31 @@ const WorkflowsPage = {
       submitting,
       startSubmitting,
       instanceActionId,
+      filters,
+      instanceFilters,
       form,
       startForm,
       instanceDetail,
+      filteredItems,
+      filteredInstances,
+      stepTypeOptions,
+      instanceStatusOptions,
+      workflowCurrentPage: workflowPager.currentPage,
+      workflowPageSize: workflowPager.pageSize,
+      workflowTotal: workflowPager.total,
+      workflowPageCount: workflowPager.pageCount,
+      workflowPagedItems: workflowPager.pagedItems,
+      workflowTableHeight: workflowPager.tableHeight,
+      workflowGoFirstPage: workflowPager.goFirstPage,
+      workflowGoLastPage: workflowPager.goLastPage,
+      instanceCurrentPage: instancePager.currentPage,
+      instancePageSize: instancePager.pageSize,
+      instanceTotal: instancePager.total,
+      instancePageCount: instancePager.pageCount,
+      instancePagedItems: instancePager.pagedItems,
+      instanceTableHeight: instancePager.tableHeight,
+      instanceGoFirstPage: instancePager.goFirstPage,
+      instanceGoLastPage: instancePager.goLastPage,
       openCreate,
       openEdit,
       openStart,
@@ -3027,6 +3727,8 @@ const WorkflowsPage = {
       openInstanceDetail,
       runInstanceAction,
       refreshAll,
+      resetFilters,
+      resetInstanceFilters,
       workflowStepType,
       formatTime,
       tagTypeByState,
@@ -3048,6 +3750,7 @@ const WorkflowsPage = {
           </div>
           <div class="toolbar-right">
             <el-button @click="refreshAll">刷新</el-button>
+            <el-button @click="resetFilters">清空筛选</el-button>
             <el-button type="primary" @click="openCreate">新建工作流</el-button>
           </div>
         </div>
@@ -3060,7 +3763,26 @@ const WorkflowsPage = {
           style="margin-bottom: 16px;"
         />
 
-        <el-table :data="state.value.items || []" stripe v-loading="state.loading">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
+            <el-form-item label="搜索">
+              <el-input v-model="filters.keyword" placeholder="输入工作流名称、ID、描述或步骤" clearable />
+            </el-form-item>
+            <el-form-item label="步骤类型">
+              <el-select v-model="filters.step_type" clearable placeholder="全部类型">
+                <el-option v-for="item in stepTypeOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="启用状态">
+              <el-select v-model="filters.enabled" clearable placeholder="全部状态">
+                <el-option label="启用" value="true" />
+                <el-option label="停用" value="false" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </div>
+
+        <el-table :data="workflowPagedItems" stripe v-loading="state.loading" row-key="id" class="list-table" :height="workflowTableHeight">
           <el-table-column prop="name" label="名称" min-width="180" />
           <el-table-column prop="id" label="ID" min-width="220" />
           <el-table-column prop="version" label="版本" width="100" />
@@ -3096,6 +3818,12 @@ const WorkflowsPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="workflowTotal > 0">
+          <el-button @click="workflowGoFirstPage" :disabled="workflowCurrentPage <= 1">首页</el-button>
+          <el-pagination v-model:current-page="workflowCurrentPage" background layout="pager" :page-size="workflowPageSize" :pager-count="7" :total="workflowTotal" />
+          <el-button @click="workflowGoLastPage" :disabled="workflowCurrentPage >= workflowPageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ workflowPageSize }} 行 / 共 {{ workflowTotal }} 条</span>
+        </div>
       </div>
 
       <div class="page-card">
@@ -3104,10 +3832,26 @@ const WorkflowsPage = {
             <h2 class="page-section-title">工作流实例</h2>
             <p class="page-section-subtitle">查看实例运行状态，并执行暂停、恢复、取消和补偿。当前实例控制基于服务端共享执行器，列表也会同步展示最近的执行快照。</p>
           </div>
-          <el-button @click="instanceResource.refresh">刷新实例</el-button>
+          <div class="toolbar-right">
+            <el-button @click="instanceResource.refresh">刷新实例</el-button>
+            <el-button @click="resetInstanceFilters">清空筛选</el-button>
+          </div>
         </div>
 
-        <el-table :data="instanceResource.state.value.items || []" stripe v-loading="instanceResource.state.loading">
+        <div class="list-filter-bar">
+          <div class="filters-grid">
+            <el-form-item label="搜索">
+              <el-input v-model="instanceFilters.keyword" placeholder="输入实例 ID、工作流 ID 或当前步骤" clearable />
+            </el-form-item>
+            <el-form-item label="状态">
+              <el-select v-model="instanceFilters.status" clearable placeholder="全部状态">
+                <el-option v-for="item in instanceStatusOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </div>
+
+        <el-table :data="instancePagedItems" stripe v-loading="instanceResource.state.loading" row-key="id" class="list-table" :height="instanceTableHeight">
           <el-table-column prop="workflow_id" label="工作流 ID" min-width="180" />
           <el-table-column prop="id" label="实例 ID" min-width="220" />
           <el-table-column label="状态" width="140">
@@ -3158,6 +3902,12 @@ const WorkflowsPage = {
             </template>
           </el-table-column>
         </el-table>
+        <div class="list-pager" v-if="instanceTotal > 0">
+          <el-button @click="instanceGoFirstPage" :disabled="instanceCurrentPage <= 1">首页</el-button>
+          <el-pagination v-model:current-page="instanceCurrentPage" background layout="pager" :page-size="instancePageSize" :pager-count="7" :total="instanceTotal" />
+          <el-button @click="instanceGoLastPage" :disabled="instanceCurrentPage >= instancePageCount">尾页</el-button>
+          <span class="list-pager__summary">每页 {{ instancePageSize }} 行 / 共 {{ instanceTotal }} 条</span>
+        </div>
       </div>
 
       <el-drawer v-model="drawerVisible" :title="form.id ? '编辑工作流' : '新建工作流'" size="860px">

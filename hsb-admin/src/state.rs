@@ -7,9 +7,9 @@ use hsb_common::{
 };
 use hsb_core::engine::{EndpointInfo, EndpointRegistry, Router};
 use hsb_core::persistence::{
-    EndpointStore, IntegrationSystemStore, OrganizationStore, PersistentMessageQuery,
-    PersistentMessageStore, RouteStore, StoredWorkflowDefinition, WorkflowInstanceQuery,
-    WorkflowStore,
+    CustomProtocolStore, EndpointStore, IntegrationSystemStore, OrganizationStore,
+    PersistentMessageQuery, PersistentMessageStore, RouteStore, StoredCustomProtocol, StoredTopic,
+    StoredWorkflowDefinition, TopicStore, WorkflowInstanceQuery, WorkflowStore,
 };
 use hsb_core::reliability::{CircuitBreakerRegistry, DeadLetter, DeadLetterQueue, DeadLetterStats};
 use hsb_core::workflow::{
@@ -26,6 +26,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::models::*;
+
+const DEFAULT_LIST_LIMIT: usize = 100;
+const MAX_LIST_LIMIT: usize = 500;
 
 #[async_trait::async_trait]
 pub trait MessageReplayService: Send + Sync {
@@ -63,6 +66,10 @@ pub struct AdminState {
     organization_store: Option<Arc<dyn OrganizationStore>>,
     // 系统目录持久化
     system_store: Option<Arc<dyn IntegrationSystemStore>>,
+    // 自定义协议持久化
+    custom_protocol_store: Option<Arc<dyn CustomProtocolStore>>,
+    // Topic 目录持久化
+    topic_store: Option<Arc<dyn TopicStore>>,
     // 机构目录
     organizations: Arc<RwLock<HashMap<String, Organization>>>,
     // 系统目录
@@ -101,6 +108,8 @@ impl AdminState {
         endpoint_store: Option<Arc<dyn EndpointStore>>,
         organization_store: Option<Arc<dyn OrganizationStore>>,
         system_store: Option<Arc<dyn IntegrationSystemStore>>,
+        custom_protocol_store: Option<Arc<dyn CustomProtocolStore>>,
+        topic_store: Option<Arc<dyn TopicStore>>,
         message_store: Option<Arc<dyn PersistentMessageStore>>,
         workflow_store: Option<Arc<dyn WorkflowStore>>,
         dlq: Arc<dyn DeadLetterQueue>,
@@ -116,6 +125,8 @@ impl AdminState {
             endpoint_store,
             organization_store,
             system_store,
+            custom_protocol_store,
+            topic_store,
             organizations: Arc::new(RwLock::new(HashMap::new())),
             systems: Arc::new(RwLock::new(HashMap::new())),
             message_store,
@@ -136,6 +147,15 @@ impl AdminState {
     // ============ 自定义协议维护 ============
 
     pub async fn list_custom_protocols(&self) -> HsbResult<Vec<CustomProtocolResponse>> {
+        if let Some(store) = &self.custom_protocol_store {
+            return store
+                .list_custom_protocols()
+                .await?
+                .into_iter()
+                .map(stored_custom_protocol_to_response)
+                .collect();
+        }
+
         let mut items: Vec<_> = self
             .custom_protocols
             .read()
@@ -147,7 +167,19 @@ impl AdminState {
         Ok(items)
     }
 
+    fn bounded_limit(limit: Option<usize>) -> usize {
+        limit.unwrap_or(DEFAULT_LIST_LIMIT).min(MAX_LIST_LIMIT)
+    }
+
     pub async fn get_custom_protocol(&self, id: &str) -> HsbResult<Option<CustomProtocolResponse>> {
+        if let Some(store) = &self.custom_protocol_store {
+            return store
+                .get_custom_protocol(id)
+                .await?
+                .map(stored_custom_protocol_to_response)
+                .transpose();
+        }
+
         Ok(self
             .custom_protocols
             .read()
@@ -164,13 +196,13 @@ impl AdminState {
         let id = req
             .id
             .unwrap_or_else(|| format!("custom_{}", ulid::Ulid::new()));
-        let mut protocols = self.custom_protocols.write().await;
-        if protocols.contains_key(&id) {
+        if self.get_custom_protocol(&id).await?.is_some() {
             return Err(HsbError::DuplicateRecord {
                 entity: "CustomProtocol".to_string(),
                 id,
             });
         }
+
         let now = Utc::now();
         let item = CustomProtocolResponse {
             id: id.clone(),
@@ -184,6 +216,15 @@ impl AdminState {
             created_at: now,
             updated_at: now,
         };
+
+        if let Some(store) = &self.custom_protocol_store {
+            store
+                .create_custom_protocol(&custom_protocol_response_to_stored(&item)?)
+                .await?;
+            return Ok(item);
+        }
+
+        let mut protocols = self.custom_protocols.write().await;
         protocols.insert(id.clone(), CustomProtocolRecord { item: item.clone() });
         Ok(item)
     }
@@ -193,6 +234,45 @@ impl AdminState {
         id: &str,
         req: UpdateCustomProtocolRequest,
     ) -> HsbResult<CustomProtocolResponse> {
+        if let Some(store) = &self.custom_protocol_store {
+            let mut item = store
+                .get_custom_protocol(id)
+                .await?
+                .map(stored_custom_protocol_to_response)
+                .transpose()?
+                .ok_or_else(|| HsbError::NotFound {
+                    entity: "CustomProtocol".to_string(),
+                    id: id.to_string(),
+                })?;
+            if let Some(name) = req.name {
+                item.name = name;
+            }
+            if let Some(description) = req.description {
+                item.description = Some(description);
+            }
+            if let Some(transport_hint) = req.transport_hint {
+                item.transport_hint = Some(transport_hint);
+            }
+            if let Some(content_type) = req.content_type {
+                item.content_type = Some(content_type);
+            }
+            if let Some(fields) = req.fields {
+                validate_custom_protocol_fields(&fields)?;
+                item.fields = fields;
+            }
+            if let Some(sample_payload) = req.sample_payload {
+                item.sample_payload = Some(sample_payload);
+            }
+            if let Some(enabled) = req.enabled {
+                item.enabled = enabled;
+            }
+            item.updated_at = Utc::now();
+            store
+                .update_custom_protocol(&custom_protocol_response_to_stored(&item)?)
+                .await?;
+            return Ok(item);
+        }
+
         let mut protocols = self.custom_protocols.write().await;
         let record = protocols.get_mut(id).ok_or_else(|| HsbError::NotFound {
             entity: "CustomProtocol".to_string(),
@@ -225,6 +305,17 @@ impl AdminState {
     }
 
     pub async fn delete_custom_protocol(&self, id: &str) -> HsbResult<()> {
+        if let Some(store) = &self.custom_protocol_store {
+            if store.get_custom_protocol(id).await?.is_none() {
+                return Err(HsbError::NotFound {
+                    entity: "CustomProtocol".to_string(),
+                    id: id.to_string(),
+                });
+            }
+            store.delete_custom_protocol(id).await?;
+            return Ok(());
+        }
+
         let removed = self.custom_protocols.write().await.remove(id);
         if removed.is_none() {
             return Err(HsbError::NotFound {
@@ -238,6 +329,15 @@ impl AdminState {
     // ============ Topic 维护 ============
 
     pub async fn list_topics(&self) -> HsbResult<Vec<TopicResponse>> {
+        if let Some(store) = &self.topic_store {
+            return store
+                .list_topics()
+                .await?
+                .into_iter()
+                .map(stored_topic_to_response)
+                .collect();
+        }
+
         let mut items: Vec<_> = self
             .topics
             .read()
@@ -250,6 +350,14 @@ impl AdminState {
     }
 
     pub async fn get_topic(&self, id: &str) -> HsbResult<Option<TopicResponse>> {
+        if let Some(store) = &self.topic_store {
+            return store
+                .get_topic(id)
+                .await?
+                .map(stored_topic_to_response)
+                .transpose();
+        }
+
         Ok(self
             .topics
             .read()
@@ -268,13 +376,21 @@ impl AdminState {
             Utc::now(),
             Utc::now(),
         )?;
-        let mut topics = self.topics.write().await;
-        if topics.contains_key(&topic.id) {
+        if self.get_topic(&topic.id).await?.is_some() {
             return Err(HsbError::DuplicateRecord {
                 entity: "Topic".to_string(),
                 id: topic.id.clone(),
             });
         }
+
+        if let Some(store) = &self.topic_store {
+            store
+                .create_topic(&topic_response_to_stored(&topic))
+                .await?;
+            return Ok(topic);
+        }
+
+        let mut topics = self.topics.write().await;
         topics.insert(
             topic.id.clone(),
             TopicRecord {
@@ -289,6 +405,39 @@ impl AdminState {
         id: &str,
         req: UpdateTopicRequest,
     ) -> HsbResult<TopicResponse> {
+        if let Some(store) = &self.topic_store {
+            let current = store
+                .get_topic(id)
+                .await?
+                .map(stored_topic_to_response)
+                .transpose()?
+                .ok_or_else(|| HsbError::NotFound {
+                    entity: "Topic".to_string(),
+                    id: id.to_string(),
+                })?;
+            let topic_name = req.topic.unwrap_or_else(|| current.topic.clone());
+            let updated = parse_topic_response(
+                topic_name,
+                req.description.or(current.description),
+                req.owner_system_id.or(current.owner_system_id),
+                req.enabled.unwrap_or(current.enabled),
+                req.properties.unwrap_or(current.properties),
+                current.created_at,
+                Utc::now(),
+            )?;
+
+            if updated.id != id && self.get_topic(&updated.id).await?.is_some() {
+                return Err(HsbError::DuplicateRecord {
+                    entity: "Topic".to_string(),
+                    id: updated.id.clone(),
+                });
+            }
+            store
+                .update_topic(id, &topic_response_to_stored(&updated))
+                .await?;
+            return Ok(updated);
+        }
+
         let mut topics = self.topics.write().await;
         let current = topics
             .get(id)
@@ -325,6 +474,17 @@ impl AdminState {
     }
 
     pub async fn delete_topic(&self, id: &str) -> HsbResult<()> {
+        if let Some(store) = &self.topic_store {
+            if store.get_topic(id).await?.is_none() {
+                return Err(HsbError::NotFound {
+                    entity: "Topic".to_string(),
+                    id: id.to_string(),
+                });
+            }
+            store.delete_topic(id).await?;
+            return Ok(());
+        }
+
         let removed = self.topics.write().await.remove(id);
         if removed.is_none() {
             return Err(HsbError::NotFound {
@@ -1213,7 +1373,7 @@ impl AdminState {
                 .list_workflow_instances(&WorkflowInstanceQuery {
                     workflow_id: params.workflow_id.clone(),
                     status: params.status.clone(),
-                    limit: params.limit,
+                    limit: Some(Self::bounded_limit(params.limit)),
                     offset: params.offset,
                 })
                 .await?
@@ -1232,7 +1392,7 @@ impl AdminState {
         filtered.sort_by(|left, right| right.created_at.cmp(&left.created_at));
 
         let offset = params.offset.unwrap_or(0);
-        let limit = params.limit.unwrap_or(filtered.len());
+        let limit = Self::bounded_limit(params.limit);
         Ok(filtered
             .into_iter()
             .skip(offset)
@@ -1346,7 +1506,7 @@ impl AdminState {
             status: params.status.map(|value| value.to_ascii_uppercase()),
             from_time: params.from_time,
             to_time: params.to_time,
-            limit: params.limit,
+            limit: Some(Self::bounded_limit(params.limit)),
             offset: params.offset,
         };
 
@@ -1386,7 +1546,7 @@ impl AdminState {
             source_system: params.source_system,
             from_time: params.from_time,
             to_time: params.to_time,
-            limit: params.limit,
+            limit: Some(Self::bounded_limit(params.limit)),
             offset: params.offset,
             ..Default::default()
         };
@@ -1429,7 +1589,7 @@ impl AdminState {
             from_time: params.from_time,
             to_time: params.to_time,
             failed_only: params.failed_only.unwrap_or(false),
-            limit: params.limit,
+            limit: Some(Self::bounded_limit(params.limit)),
             offset: params.offset,
             ..Default::default()
         };
@@ -1559,9 +1719,8 @@ impl AdminState {
             });
         };
 
-        let protocols = self.custom_protocols.read().await;
-        match protocols.get(custom_protocol_id) {
-            Some(record) if record.item.enabled => Ok(()),
+        match self.get_custom_protocol(custom_protocol_id).await? {
+            Some(item) if item.enabled => Ok(()),
             Some(_) => Err(HsbError::InvalidField {
                 field: "custom_protocol_id".to_string(),
                 reason: format!("Custom protocol '{}' is disabled", custom_protocol_id),
@@ -2062,6 +2221,25 @@ fn validate_endpoint_protocol_properties(
             }
             Ok(())
         }
+        ProtocolType::Webhook => {
+            let method = properties
+                .get("webhook_method")
+                .map(|value| value.trim().to_ascii_uppercase())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "POST".to_string());
+            let supported = ["POST"];
+            if !supported.contains(&method.as_str()) {
+                return Err(HsbError::InvalidField {
+                    field: "webhook_method".to_string(),
+                    reason: format!(
+                        "Unsupported webhook method '{}'. Supported: {}",
+                        method,
+                        supported.join(", ")
+                    ),
+                });
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -2093,6 +2271,72 @@ fn parse_topic_response(
         properties,
         created_at,
         updated_at,
+    })
+}
+
+fn topic_response_to_stored(topic: &TopicResponse) -> StoredTopic {
+    StoredTopic {
+        topic: topic.topic.clone(),
+        description: topic.description.clone(),
+        owner_system_id: topic.owner_system_id.clone(),
+        enabled: topic.enabled,
+        properties: topic.properties.clone(),
+        created_at: topic.created_at,
+        updated_at: topic.updated_at,
+    }
+}
+
+fn stored_topic_to_response(topic: StoredTopic) -> HsbResult<TopicResponse> {
+    parse_topic_response(
+        topic.topic,
+        topic.description,
+        topic.owner_system_id,
+        topic.enabled,
+        topic.properties,
+        topic.created_at,
+        topic.updated_at,
+    )
+}
+
+fn custom_protocol_response_to_stored(
+    protocol: &CustomProtocolResponse,
+) -> HsbResult<StoredCustomProtocol> {
+    Ok(StoredCustomProtocol {
+        id: protocol.id.clone(),
+        name: protocol.name.clone(),
+        description: protocol.description.clone(),
+        transport_hint: protocol.transport_hint.clone(),
+        content_type: protocol.content_type.clone(),
+        fields: serde_json::to_value(&protocol.fields).map_err(|e| {
+            HsbError::SerializationError {
+                message: format!("Failed to serialize custom protocol fields: {}", e),
+            }
+        })?,
+        sample_payload: protocol.sample_payload.clone(),
+        enabled: protocol.enabled,
+        created_at: protocol.created_at,
+        updated_at: protocol.updated_at,
+    })
+}
+
+fn stored_custom_protocol_to_response(
+    protocol: StoredCustomProtocol,
+) -> HsbResult<CustomProtocolResponse> {
+    Ok(CustomProtocolResponse {
+        id: protocol.id,
+        name: protocol.name,
+        description: protocol.description,
+        transport_hint: protocol.transport_hint,
+        content_type: protocol.content_type,
+        fields: serde_json::from_value(protocol.fields).map_err(|e| {
+            HsbError::SerializationError {
+                message: format!("Failed to parse custom protocol fields: {}", e),
+            }
+        })?,
+        sample_payload: protocol.sample_payload,
+        enabled: protocol.enabled,
+        created_at: protocol.created_at,
+        updated_at: protocol.updated_at,
     })
 }
 

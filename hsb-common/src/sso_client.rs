@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{HsbError, HsbResult};
 
+const AUTHORIZE_PATH: &str = "/authorize";
+const TOKEN_PATH: &str = "/token";
+const USERINFO_PATH: &str = "/userinfo";
+const LOGOUT_PATH: &str = "/logout";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
@@ -24,9 +29,13 @@ pub struct TokenResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
+    #[serde(default)]
     pub sub: String,
+    #[serde(default)]
     pub username: String,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub email: String,
     pub email_verified: Option<bool>,
     pub roles: Option<Vec<String>>,
@@ -71,8 +80,8 @@ impl SSOClient {
     pub fn get_authorization_url(&self, scope: &str) -> (String, String) {
         let state = Self::generate_state();
         let url = format!(
-            "{}/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}",
-            self.server_url,
+            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}",
+            self.endpoint_url(AUTHORIZE_PATH),
             urlencoding::encode(&self.client_id),
             urlencoding::encode(&self.redirect_uri),
             urlencoding::encode(scope),
@@ -94,7 +103,7 @@ impl SSOClient {
 
         let resp = self
             .http
-            .post(format!("{}/oauth/token", self.server_url))
+            .post(self.endpoint_url(TOKEN_PATH))
             .form(&params)
             .send()
             .await
@@ -105,9 +114,8 @@ impl SSOClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(HsbError::AuthenticationError {
-                message: format!("Token exchange failed: status={}, body={}", status, body),
+                message: format!("Token exchange failed: status={}", status),
             });
         }
 
@@ -129,7 +137,7 @@ impl SSOClient {
 
         let resp = self
             .http
-            .post(format!("{}/oauth/token", self.server_url))
+            .post(self.endpoint_url(TOKEN_PATH))
             .form(&params)
             .send()
             .await
@@ -140,9 +148,8 @@ impl SSOClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(HsbError::AuthenticationError {
-                message: format!("Token refresh failed: status={}, body={}", status, body),
+                message: format!("Token refresh failed: status={}", status),
             });
         }
 
@@ -157,7 +164,7 @@ impl SSOClient {
     pub async fn get_user_info(&self, access_token: &str) -> HsbResult<UserInfo> {
         let resp = self
             .http
-            .get(format!("{}/api/user/profile", self.server_url))
+            .get(self.endpoint_url(USERINFO_PATH))
             .bearer_auth(access_token)
             .send()
             .await
@@ -168,9 +175,8 @@ impl SSOClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(HsbError::AuthenticationError {
-                message: format!("Failed to get user info: status={}, body={}", status, body),
+                message: format!("Failed to get user info: status={}", status),
             });
         }
 
@@ -183,7 +189,7 @@ impl SSOClient {
 
     /// 调用 SSO 登出接口。
     pub async fn logout(&self, access_token: Option<&str>) -> HsbResult<()> {
-        let mut req = self.http.get(format!("{}/api/logout", self.server_url));
+        let mut req = self.http.get(self.endpoint_url(LOGOUT_PATH));
 
         if let Some(token) = access_token {
             req = req.bearer_auth(token);
@@ -196,13 +202,16 @@ impl SSOClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
             return Err(HsbError::AuthenticationError {
-                message: format!("Logout failed: status={}, body={}", status, body),
+                message: format!("Logout failed: status={}", status),
             });
         }
 
         Ok(())
+    }
+
+    fn endpoint_url(&self, path: &str) -> String {
+        format!("{}{}", self.server_url, path)
     }
 
     fn generate_state() -> String {
@@ -349,12 +358,41 @@ mod tests {
         let (url, state) = client.get_authorization_url("openid profile email");
 
         assert!(url.contains("response_type=code"));
+        assert!(url.starts_with("https://rust-sso.example.internal/authorize?"));
         assert!(url.contains(&format!(
             "redirect_uri={}",
             urlencoding::encode(&callback_url)
         )));
         assert!(url.contains("scope=openid%20profile%20email"));
         assert!(!state.is_empty());
+    }
+
+    #[test]
+    fn rust_sso_endpoint_paths_match_server_routes() {
+        let client = SSOClient::new(
+            "https://rust-sso.example.internal/",
+            "hsb-web",
+            "secret",
+            &callback_url(),
+        )
+        .expect("client should build");
+
+        assert_eq!(
+            client.endpoint_url(super::AUTHORIZE_PATH),
+            "https://rust-sso.example.internal/authorize"
+        );
+        assert_eq!(
+            client.endpoint_url(super::TOKEN_PATH),
+            "https://rust-sso.example.internal/token"
+        );
+        assert_eq!(
+            client.endpoint_url(super::USERINFO_PATH),
+            "https://rust-sso.example.internal/userinfo"
+        );
+        assert_eq!(
+            client.endpoint_url(super::LOGOUT_PATH),
+            "https://rust-sso.example.internal/logout"
+        );
     }
 
     #[test]

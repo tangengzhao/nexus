@@ -43,13 +43,13 @@ serde_bytes = "0.11"
 quick-xml = { version = "0.37", features = ["serialize"] }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "json"] }
 
 # ULID (replaces UUID)
 ulid = { version = "1.1", features = ["serde"] }
 
 # NATS
-async-nats = "0.38"
+async-nats = "0.48"
 
 # Embedded KV store
 redb = "2.4"
@@ -58,7 +58,7 @@ redb = "2.4"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Bytes
-bytes = "1.9"
+bytes = "1.11.1"
 
 # Error handling
 thiserror = "2.0"
@@ -119,7 +119,7 @@ argon2 = "0.5"
 jsonwebtoken = "9.3"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Internal crates
 hsb-common = { path = "hsb-common" }

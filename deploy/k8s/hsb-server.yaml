@@ -10,8 +10,10 @@ metadata:
   namespace: admin
 type: Opaque
 stringData:
-  HSB_DATABASE_URL: postgres://hsbuser:change-me@postgres.admin.svc.cluster.local:5432/hsb
-  RUST_SSO_CLIENT_SECRET: change-me
+  HSB_DATABASE_URL: postgres://hsbuser:REPLACE_WITH_STRONG_DB_PASSWORD@postgres.admin.svc.cluster.local:5432/hsb
+  HSB_MQ_USERNAME: hsb
+  HSB_MQ_PASSWORD: REPLACE_WITH_STRONG_MQ_PASSWORD
+  RUST_SSO_CLIENT_SECRET: REPLACE_WITH_STRONG_SSO_CLIENT_SECRET
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -176,6 +178,16 @@ spec:
                 secretKeyRef:
                   name: hsb-server-secret
                   key: RUST_SSO_CLIENT_SECRET
+            - name: HSB_MQ_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: hsb-server-secret
+                  key: HSB_MQ_USERNAME
+            - name: HSB_MQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: hsb-server-secret
+                  key: HSB_MQ_PASSWORD
             - name: HSB_KAFKA_BOOTSTRAP_SERVERS
               value: redpanda.admin.svc.cluster.local:9092
             - name: HSB_KAFKA_TOPICS
@@ -189,8 +201,6 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-            - name: admin
-              containerPort: 8081
             - name: tcp-mllp
               containerPort: 2575
             - name: grpc
@@ -249,9 +259,6 @@ spec:
     - name: http
       port: 8080
       targetPort: http
-    - name: admin
-      port: 8081
-      targetPort: admin
     - name: tcp-mllp
       port: 2575
       targetPort: tcp-mllp

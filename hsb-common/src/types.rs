@@ -233,17 +233,17 @@ impl Topic {
 
     /// 返回 service 段
     pub fn service(&self) -> &str {
-        self.0.splitn(3, '.').nth(1).unwrap_or("")
+        self.0.split('.').nth(1).unwrap_or("")
     }
 
     /// 返回 action 段
     pub fn action(&self) -> &str {
-        self.0.splitn(4, '.').nth(2).unwrap_or("")
+        self.0.split('.').nth(2).unwrap_or("")
     }
 
     /// 返回 version 段
     pub fn version(&self) -> &str {
-        self.0.rsplitn(2, '.').next().unwrap_or("")
+        self.0.rsplit('.').next().unwrap_or("")
     }
 
     /// 转为 NATS subject（原样返回，因为格式兼容）
@@ -280,6 +280,8 @@ impl std::str::FromStr for Topic {
 pub enum ProtocolType {
     /// HTTP/REST
     Http,
+    /// Webhook 回调
+    Webhook,
     /// HL7 v2.x (MLLP)
     Hl7V2,
     /// HL7 v3 XML
@@ -310,6 +312,7 @@ impl ProtocolType {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Http => "HTTP",
+            Self::Webhook => "WEBHOOK",
             Self::Hl7V2 => "HL7V2",
             Self::Hl7V3 => "HL7V3",
             Self::FhirR5 => "FHIR_R5",
@@ -328,6 +331,7 @@ impl ProtocolType {
     pub fn default_port(&self) -> Option<u16> {
         match self {
             Self::Http => Some(80),
+            Self::Webhook => Some(443),
             Self::Hl7V2 => Some(2575), // MLLP 标准端口
             Self::Hl7V3 => None,
             Self::FhirR5 => Some(443),
@@ -355,6 +359,7 @@ impl std::str::FromStr for ProtocolType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
             "HTTP" => Ok(Self::Http),
+            "WEBHOOK" | "WEB_HOOK" | "CALLBACK" => Ok(Self::Webhook),
             "HL7V2" | "HL7" | "MLLP" => Ok(Self::Hl7V2),
             "HL7V3" | "V3" | "CDA" => Ok(Self::Hl7V3),
             "FHIR" | "FHIR_R5" => Ok(Self::FhirR5),
@@ -366,7 +371,8 @@ impl std::str::FromStr for ProtocolType {
             "DATABASE" | "DB" | "POSTGRES" | "POSTGRESQL" | "ORACLE" | "MYSQL" | "SQLSERVER"
             | "MSSQL" | "HIVE" | "CLICKHOUSE" => Ok(Self::Database),
             "OPENAI" | "OPEN_AI" | "LLM" | "CHATGPT" => Ok(Self::OpenAi),
-            "CUSTOM" | _ => Ok(Self::Custom),
+            "CUSTOM" => Ok(Self::Custom),
+            _ => Ok(Self::Custom),
         }
     }
 }
@@ -421,12 +427,13 @@ impl MessageStatus {
 // ============ 消息优先级 ============
 
 /// 消息优先级
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MessagePriority {
     /// 低优先级
     Low = 0,
     /// 普通优先级
+    #[default]
     Normal = 1,
     /// 高优先级
     High = 2,
@@ -434,12 +441,6 @@ pub enum MessagePriority {
     Urgent = 3,
     /// 最高优先级（系统级）
     Critical = 4,
-}
-
-impl Default for MessagePriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl MessagePriority {

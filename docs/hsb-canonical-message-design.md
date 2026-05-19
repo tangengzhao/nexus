@@ -8,7 +8,7 @@
 
 - 支持每个医院、每个业务线、每个上下游系统自定义接口消息定义
 - 支持来源消息定义和目标消息定义不一致的场景
-- 支持 HL7、FHIR、DICOM、SOAP、JSON/XML 等异构协议间转换
+- 支持 HL7、FHIR、DICOM、SOAP、JSON/XML、Webhook、OpenAI 兼容接口等异构协议间转换
 - 在转换过程中保留原始报文、扩展字段、未识别字段和协议细节，做到进来不失真
 - 让消息建模、接口定义、映射规则、测试样例、发布版本都可视化管理
 - 与现有统一 Message、Adapter、TransformerChain、Route 机制兼容
@@ -53,6 +53,8 @@
 6. 按目标映射模板将规范模型转换为目标接口结构
 7. 目标协议适配器序列化生成目标报文
 8. 持久化转换轨迹、字段映射结果、告警与审计信息
+
+补充说明：当前 `OPENAI` 与 `WEBHOOK` 均作为 HTTP 投递型消费者端点接入规范模型链路；`DATABASE` 已进入端点配置与接口定义模型，但运行态数据库直连 SQL 执行层仍需后续实现。
 
 ### 3.2 与现有代码的对应关系
 
@@ -147,6 +149,9 @@
 - HIS_ADT_A01_V2_5_INBOUND
 - LIS_ORDER_CREATE_JSON_V1_OUTBOUND
 - PACS_REPORT_FHIR_DIAGNOSTICREPORT_V1_OUTBOUND
+- LIS_ORDER_CREATED_WEBHOOK_V1_OUTBOUND
+- AI_REPORT_SUMMARY_OPENAI_RESPONSES_V1_OUTBOUND
+- HIS_PATIENT_LOOKUP_DATABASE_POSTGRESQL_V1_CONSUMER
 
 ### 4.5 接口字段 Interface Field
 

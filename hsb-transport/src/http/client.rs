@@ -20,7 +20,7 @@ impl HttpClient {
             .timeout(Duration::from_secs(config.timeout_secs))
             .pool_max_idle_per_host(config.pool_config.max_connections as usize);
 
-        if config.disable_certificate_validation {
+        if config.disable_certificate_validation && insecure_tls_override_enabled() {
             builder = builder.danger_accept_invalid_certs(true);
         }
 
@@ -107,6 +107,12 @@ impl HttpClient {
             body,
         })
     }
+}
+
+fn insecure_tls_override_enabled() -> bool {
+    std::env::var("HSB_ALLOW_INSECURE_TLS")
+        .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+        .unwrap_or(false)
 }
 
 /// HTTP 方法

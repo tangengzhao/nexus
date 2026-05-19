@@ -52,7 +52,7 @@ impl HttpTransport {
             client_builder = client_builder.proxy(proxy);
         }
 
-        if config.disable_certificate_validation {
+        if config.disable_certificate_validation && insecure_tls_override_enabled() {
             client_builder = client_builder.danger_accept_invalid_certs(true);
         }
 
@@ -99,6 +99,12 @@ impl HttpTransport {
             stats.errors.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+fn insecure_tls_override_enabled() -> bool {
+    std::env::var("HSB_ALLOW_INSECURE_TLS")
+        .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+        .unwrap_or(false)
 }
 
 #[async_trait]

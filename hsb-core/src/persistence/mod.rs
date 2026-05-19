@@ -18,6 +18,7 @@ use crate::{
 use async_trait::async_trait;
 use hsb_common::HsbResult;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// 消息查询条件
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -142,6 +143,53 @@ pub trait IntegrationSystemStore: Send + Sync {
     async fn list_systems(&self) -> HsbResult<Vec<IntegrationSystem>>;
     async fn update_system(&self, system: &IntegrationSystem) -> HsbResult<()>;
     async fn delete_system(&self, id: &str) -> HsbResult<()>;
+}
+
+/// 持久化的自定义协议定义
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredCustomProtocol {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub transport_hint: Option<String>,
+    pub content_type: Option<String>,
+    pub fields: serde_json::Value,
+    pub sample_payload: Option<serde_json::Value>,
+    pub enabled: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 自定义协议持久化存储 Trait
+#[async_trait]
+pub trait CustomProtocolStore: Send + Sync {
+    async fn create_custom_protocol(&self, protocol: &StoredCustomProtocol) -> HsbResult<()>;
+    async fn get_custom_protocol(&self, id: &str) -> HsbResult<Option<StoredCustomProtocol>>;
+    async fn list_custom_protocols(&self) -> HsbResult<Vec<StoredCustomProtocol>>;
+    async fn update_custom_protocol(&self, protocol: &StoredCustomProtocol) -> HsbResult<()>;
+    async fn delete_custom_protocol(&self, id: &str) -> HsbResult<()>;
+}
+
+/// 持久化的 Topic 目录项
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredTopic {
+    pub topic: String,
+    pub description: Option<String>,
+    pub owner_system_id: Option<String>,
+    pub enabled: bool,
+    pub properties: HashMap<String, String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Topic 目录持久化存储 Trait
+#[async_trait]
+pub trait TopicStore: Send + Sync {
+    async fn create_topic(&self, topic: &StoredTopic) -> HsbResult<()>;
+    async fn get_topic(&self, id: &str) -> HsbResult<Option<StoredTopic>>;
+    async fn list_topics(&self) -> HsbResult<Vec<StoredTopic>>;
+    async fn update_topic(&self, id: &str, topic: &StoredTopic) -> HsbResult<()>;
+    async fn delete_topic(&self, id: &str) -> HsbResult<()>;
 }
 
 /// 工作流实例查询条件

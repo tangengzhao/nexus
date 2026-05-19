@@ -504,6 +504,8 @@ mod tests {
             endpoint_store.map(|store| store as Arc<dyn EndpointStore>),
             None,
             None,
+            None,
+            None,
             message_store.map(|store| store as Arc<dyn PersistentMessageStore>),
             Some(workflow_store as Arc<dyn WorkflowStore>),
             Arc::new(InMemoryDlq::new(128)),

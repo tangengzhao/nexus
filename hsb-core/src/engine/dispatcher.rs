@@ -67,7 +67,11 @@ impl DefaultDispatcher {
         address: &str,
     ) -> HsbResult<&'static str> {
         match protocol {
-            ProtocolType::Http | ProtocolType::FhirR5 | ProtocolType::Soap => Ok("http"),
+            ProtocolType::Http
+            | ProtocolType::Webhook
+            | ProtocolType::FhirR5
+            | ProtocolType::Soap
+            | ProtocolType::OpenAi => Ok("http"),
             ProtocolType::Hl7V3 => {
                 if address.starts_with("grpc://") {
                     Ok("grpc")
@@ -94,7 +98,6 @@ impl DefaultDispatcher {
                     Ok("mq")
                 }
             }
-            ProtocolType::OpenAi => Ok("http"),
             ProtocolType::Database => Err(HsbError::ProtocolNotSupported {
                 protocol: "DATABASE".to_string(),
             }),

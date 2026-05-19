@@ -21,10 +21,10 @@ Nexus HSB 采用六层架构设计，提供完整的医疗信息交换能力：
 │         路由引擎 / 消息转换 / 处理管道 / 组件注册               │
 ├─────────────────────────────────────────────────────────────┤
 │                    协议适配层 (hsb-adapter-*)                  │
-│         HL7 v2.x / FHIR R5 / DICOM / SOAP                     │
+│         HL7 v2.x / FHIR R5 / DICOM / SOAP / Custom            │
 ├─────────────────────────────────────────────────────────────┤
 │                    接入层 (hsb-transport-*)                    │
-│         HTTP/HTTPS / TCP/MLLP / gRPC / RabbitMQ               │
+│         HTTP/HTTPS / Webhook / TCP/MLLP / gRPC / MQ           │
 └─────────────────────────────────────────────────────────────┘
 ```
 sequenceDiagram
@@ -48,7 +48,7 @@ sequenceDiagram
     Client->>HTTP: 发送原始报文
     HTTP->>Runtime: handle_http_inbound(headers, body)
 
-    alt HTTP/JSON或通用协议
+    alt HTTP/JSON、Webhook、OpenAI、Database配置型或通用协议
         Runtime->>Msg: build_generic_http_message(...)
     else HL7/FHIR/DICOM/SOAP
         Runtime->>Adapter: parse(raw)
@@ -196,7 +196,7 @@ Options:
 | `http.port` | HTTP 服务端口 | 8080 |
 | `http.admin_port` | Admin API 端口 | 8081 |
 | `tcp.port` | TCP/MLLP 端口 | 2575 |
-| `grpc.port` | gRPC 端口 | 50051 |
+| `grpc.port` | gRPC 端口 | 10051 |
 | `reliability.max_retries` | 最大重试次数 | 3 |
 | `audit.retention_days` | 审计日志保留天数 | 90 |
 
@@ -347,6 +347,19 @@ scope = "openid profile email"
 当浏览器访问主页时，未登录用户会先跳转到统一单点登录页；登录完成后，SSO 会回调到本项目的 /auth/callback，再回到主页。
 
 ## 📋 支持的协议
+
+| 协议 | 当前状态 | 说明 |
+|------|----------|------|
+| HTTP | 可入站、可投递 | 通用 HTTP/JSON 接入与回调 |
+| WEBHOOK | 可入站、可投递 | Webhook 回调协议，当前按 HTTP POST 投递，可在端点属性中记录事件类型、签名 Header 和签名密钥引用 |
+| HL7V2 | 可入站、可投递 | HL7 v2.x，支持 TCP/MLLP |
+| HL7V3 | 可入站、可按地址选择传输 | HL7 v3 XML/CDA |
+| FHIR_R5 | 可入站、可投递 | HL7 FHIR R5，HTTP/FHIR JSON 或 XML |
+| DICOM | 可入站、可投递 | DICOM 影像通信 |
+| SOAP | 可入站、可投递 | SOAP 1.1/1.2 WebService |
+| OPENAI | 可配置、可投递 | OpenAI 兼容消费者端点，运行时走 HTTP transport，支持模型、接口类型、Organization、Project 等端点属性 |
+| DATABASE | 可配置建模，运行投递未完成 | 数据库直连端点可配置数据库类型、数据库名、Schema、JDBC URL；当前分发器仍返回 DATABASE not supported，后续需实现实际 SQL/连接池执行层 |
+| CUSTOM | 可配置建模 | 自定义协议目录与端点绑定已支持；运行态需根据具体传输提示落地适配 |
 
 ### HL7 v2.x
 
