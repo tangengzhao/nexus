@@ -70,12 +70,14 @@ pub fn test_message_deserialization() -> Result<(), String> {
 
 /// 测试消息元数据操作
 pub fn test_metadata_operations() -> Result<(), String> {
-    let mut metadata = MessageMetadata::default();
-    metadata.patient_id = Some("P12345".to_string());
-    metadata.visit_id = Some("V67890".to_string());
-    metadata.department_code = Some("INTERNAL".to_string());
-    metadata.sending_application = Some("HIS".to_string());
-    metadata.sending_facility = Some("HOSPITAL".to_string());
+    let metadata = MessageMetadata {
+        patient_id: Some("P12345".to_string()),
+        visit_id: Some("V67890".to_string()),
+        department_code: Some("INTERNAL".to_string()),
+        sending_application: Some("HIS".to_string()),
+        sending_facility: Some("HOSPITAL".to_string()),
+        ..Default::default()
+    };
 
     if metadata.patient_id.as_deref() != Some("P12345") {
         return Err("患者ID不匹配".to_string());
@@ -149,7 +151,7 @@ pub fn test_transformer_chain() -> Result<(), String> {
         return Err("新建转换器链应该为空".to_string());
     }
 
-    if chain.len() != 0 {
+    if !chain.is_empty() {
         return Err("新建转换器链长度应该为0".to_string());
     }
 

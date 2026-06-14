@@ -75,7 +75,7 @@ impl NatsTransport {
     pub async fn publish(&self, subject: &str, payload: Bytes) -> HsbResult<()> {
         let client = self.client().await?;
         client
-            .publish(subject.to_string(), payload.into())
+            .publish(subject.to_string(), payload)
             .await
             .map_err(|e| HsbError::TransportError {
                 message: format!("NATS publish failed: {}", e),
@@ -93,7 +93,7 @@ impl NatsTransport {
     ) -> HsbResult<Bytes> {
         let client = self.client().await?;
         let response =
-            tokio::time::timeout(timeout, client.request(subject.to_string(), payload.into()))
+            tokio::time::timeout(timeout, client.request(subject.to_string(), payload))
                 .await
                 .map_err(|_| HsbError::TimeoutError {
                     operation: format!("NATS request to {}", subject),

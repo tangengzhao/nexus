@@ -154,7 +154,7 @@ pub enum ResourceType {
 }
 
 impl ResourceType {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "Patient" => Self::Patient,
             "Encounter" => Self::Encounter,

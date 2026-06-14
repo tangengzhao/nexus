@@ -107,11 +107,11 @@ data:
 
     [sso]
     enabled = true
-    endpoint = "http://rust-sso.admin.svc.cluster.local:50051"
-    web_base_url = "https://mydomain.com/rust-sso"
+    endpoint = "https://health.nanhai.gov.cn/sso"
+    web_base_url = "https://health.nanhai.gov.cn/sso"
     client_id = "hsb-service"
     client_secret = "change-me"
-    callback_url = "https://mydomain.com/hsb/auth/callback"
+    callback_url = "https://health.nanhai.gov.cn/hsb/auth/callback"
     scope = "openid profile email"
     token_cache_secs = 300
 
@@ -195,9 +195,9 @@ spec:
             - name: HSB_NATS_URLS
               value: nats://nats.admin.svc.cluster.local:4222
             - name: RUST_SSO_WEB_BASE_URL
-              value: https://mydomain.com/rust-sso
+              value: https://health.nanhai.gov.cn/sso
             - name: HSB_SSO_CALLBACK_URL
-              value: https://mydomain.com/hsb/auth/callback
+              value: https://health.nanhai.gov.cn/hsb/auth/callback
           ports:
             - name: http
               containerPort: 8080

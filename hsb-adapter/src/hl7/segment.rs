@@ -51,12 +51,13 @@ impl MessageType {
         }
     }
 
-    pub fn to_string(&self) -> String {
+}
+
+impl std::fmt::Display for MessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.message_structure {
-            Some(structure) => {
-                format!("{}^{}^{}", self.message_type, self.trigger_event, structure)
-            }
-            None => format!("{}^{}", self.message_type, self.trigger_event),
+            Some(structure) => write!(f, "{}^{}^{}", self.message_type, self.trigger_event, structure),
+            None => write!(f, "{}^{}", self.message_type, self.trigger_event),
         }
     }
 }

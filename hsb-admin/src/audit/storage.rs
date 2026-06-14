@@ -28,65 +28,47 @@ impl InMemoryAuditStorage {
             .iter()
             .filter(|e| {
                 // Trace ID
-                if let Some(ref trace_id) = filter.trace_id {
-                    if e.trace_id.as_ref() != Some(trace_id) {
+                if let Some(ref trace_id) = filter.trace_id && e.trace_id.as_ref() != Some(trace_id) {
                         return false;
                     }
-                }
 
                 // Message ID
-                if let Some(ref message_id) = filter.message_id {
-                    if e.message_id.as_ref() != Some(message_id) {
+                if let Some(ref message_id) = filter.message_id && e.message_id.as_ref() != Some(message_id) {
                         return false;
                     }
-                }
 
                 // Event types
-                if let Some(ref types) = filter.event_types {
-                    if !types.contains(&e.event_type) {
+                if let Some(ref types) = filter.event_types && !types.contains(&e.event_type) {
                         return false;
                     }
-                }
 
                 // Min severity
-                if let Some(min_severity) = filter.min_severity {
-                    if e.severity < min_severity {
+                if let Some(min_severity) = filter.min_severity && e.severity < min_severity {
                         return false;
                     }
-                }
 
                 // Source system
-                if let Some(ref source) = filter.source_system {
-                    if e.source_system.as_ref() != Some(source) {
+                if let Some(ref source) = filter.source_system && e.source_system.as_ref() != Some(source) {
                         return false;
                     }
-                }
 
                 // Target system
-                if let Some(ref target) = filter.target_system {
-                    if e.target_system.as_ref() != Some(target) {
+                if let Some(ref target) = filter.target_system && e.target_system.as_ref() != Some(target) {
                         return false;
                     }
-                }
 
                 // Component
-                if let Some(ref component) = filter.component {
-                    if &e.component != component {
+                if let Some(ref component) = filter.component && &e.component != component {
                         return false;
                     }
-                }
 
                 // Time range
-                if let Some(from) = filter.from_time {
-                    if e.timestamp < from {
+                if let Some(from) = filter.from_time && e.timestamp < from {
                         return false;
                     }
-                }
-                if let Some(to) = filter.to_time {
-                    if e.timestamp > to {
+                if let Some(to) = filter.to_time && e.timestamp > to {
                         return false;
                     }
-                }
 
                 // Failed only
                 if filter.failed_only && e.success {
@@ -136,7 +118,7 @@ impl AuditService for InMemoryAuditStorage {
             .collect();
 
         // 按时间倒序
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        filtered.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
 
         // 应用分页
         let offset = filter.offset.unwrap_or(0);

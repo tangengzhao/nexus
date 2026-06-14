@@ -93,7 +93,7 @@ impl Modality {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "CT" => Some(Self::CT),
             "MR" => Some(Self::MR),

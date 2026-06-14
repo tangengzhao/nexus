@@ -972,6 +972,7 @@ fn is_soap_body(body: &Bytes) -> bool {
         || content.contains("soap-envelope")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_generic_http_message(
     source_system: &str,
     target_system: Option<&str>,
@@ -1502,7 +1503,7 @@ mod tests {
                 .filter(|message| !message.status.is_terminal())
                 .cloned()
                 .collect();
-            messages.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+            messages.sort_by_key(|m| m.created_at);
             messages.truncate(limit);
             Ok(messages)
         }

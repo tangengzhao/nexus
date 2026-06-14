@@ -75,7 +75,7 @@ impl TransformerChain {
         }
     }
 
-    pub fn add(mut self, transformer: Arc<dyn Transformer>) -> Self {
+    pub fn push(mut self, transformer: Arc<dyn Transformer>) -> Self {
         self.transformers.push(transformer);
         self
     }
@@ -421,10 +421,10 @@ mod tests {
             .expect("Message should be valid");
 
         let chain = TransformerChain::new()
-            .add(Arc::new(
+            .push(Arc::new(
                 HeaderTransformer::new("t1", "Add Header").set("X-Step", "1"),
             ))
-            .add(Arc::new(
+            .push(Arc::new(
                 HeaderTransformer::new("t2", "Add Another").set("X-Step2", "2"),
             ));
 

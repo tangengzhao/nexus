@@ -121,11 +121,9 @@ impl SsoClient {
         // 检查缓存
         {
             let cache = self.token_cache.read().await;
-            if let Some(ref cached) = *cache {
-                if cached.expires_at > chrono::Utc::now() {
+            if let Some(ref cached) = *cache && cached.expires_at > chrono::Utc::now() {
                     return Ok(cached.access_token.clone());
                 }
-            }
         }
 
         // 请求新令牌

@@ -47,11 +47,11 @@ impl JetStreamManager {
             .get_or_create_stream(jetstream::stream::Config {
                 name: self.config.default_stream.clone(),
                 subjects: self.config.stream_subjects.clone(),
-                retention: retention,
-                storage: storage,
+                retention,
+                storage,
                 max_messages: self.config.max_messages,
                 max_bytes: self.config.max_bytes,
-                max_age: max_age,
+                max_age,
                 num_replicas: self.config.num_replicas,
                 duplicate_window: std::time::Duration::from_secs(self.config.dedup_window_secs),
                 ..Default::default()
@@ -73,7 +73,7 @@ impl JetStreamManager {
     pub async fn publish(&self, subject: &str, payload: Bytes) -> HsbResult<()> {
         let ack = self
             .context
-            .publish(subject.to_string(), payload.into())
+            .publish(subject.to_string(), payload)
             .await
             .map_err(|e| HsbError::TransportError {
                 message: format!("JetStream publish failed: {}", e),
@@ -115,7 +115,7 @@ impl JetStreamManager {
                     headers.insert("Nats-Msg-Id", msg_id_header);
                     headers
                 },
-                payload.into(),
+                payload,
             )
             .await
             .map_err(|e| HsbError::TransportError {

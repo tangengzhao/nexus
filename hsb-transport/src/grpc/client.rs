@@ -108,13 +108,11 @@ impl GrpcRequestBuilder {
         for (key, value) in self.metadata {
             if let Ok(meta_key) =
                 tonic::metadata::MetadataKey::<tonic::metadata::Ascii>::from_bytes(key.as_bytes())
-            {
-                if let Ok(meta_value) =
+                && let Ok(meta_value) =
                     tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(&value)
-                {
+            {
                     request.metadata_mut().insert(meta_key, meta_value);
                 }
-            }
         }
 
         // 设置超时

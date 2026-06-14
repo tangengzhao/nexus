@@ -81,11 +81,9 @@ impl ProtocolAdapter for Hl7V3Adapter {
     }
 
     async fn serialize(&self, msg: &Message, options: &SerializeOptions) -> HsbResult<Bytes> {
-        if let Some(payload) = msg.payload.as_ref() {
-            if let Some(raw_xml) = payload.get("raw_xml").and_then(Value::as_str) {
+        if let Some(payload) = msg.payload.as_ref() && let Some(raw_xml) = payload.get("raw_xml").and_then(Value::as_str) {
                 return Ok(Bytes::from(raw_xml.to_string()));
             }
-        }
 
         if !msg.raw_payload.is_empty() {
             return Ok(Bytes::from(msg.raw_payload.clone()));

@@ -40,11 +40,11 @@ impl EncodingCharacters {
         })
     }
 
-    pub fn to_string(&self) -> String {
-        format!(
-            "{}{}{}{}",
-            self.component, self.repetition, self.escape, self.subcomponent
-        )
+}
+
+impl std::fmt::Display for EncodingCharacters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}{}{}", self.component, self.repetition, self.escape, self.subcomponent)
     }
 }
 

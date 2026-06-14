@@ -71,12 +71,12 @@ impl CircuitBreaker {
         // 检查是否应该从 Open 转换到 HalfOpen
         if *state == CircuitState::Open {
             let last_failure = self.last_failure_time.read().await;
-            if let Some(time) = *last_failure {
-                if time.elapsed() > Duration::from_secs(self.config.open_duration_secs) {
-                    *state = CircuitState::HalfOpen;
-                    self.success_count.store(0, Ordering::Relaxed);
-                    info!("Circuit breaker '{}' transitioning to HalfOpen", self.name);
-                }
+            if let Some(time) = *last_failure
+                && time.elapsed() > Duration::from_secs(self.config.open_duration_secs)
+            {
+                *state = CircuitState::HalfOpen;
+                self.success_count.store(0, Ordering::Relaxed);
+                info!("Circuit breaker '{}' transitioning to HalfOpen", self.name);
             }
         }
 

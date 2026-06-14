@@ -241,21 +241,12 @@ pub trait WorkflowStore: Send + Sync {
 }
 
 /// 持久化层配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistenceConfig {
     /// Redb 配置
     pub redb: RedbConfig,
     /// PostgreSQL 配置
     pub postgres: PostgresConfig,
-}
-
-impl Default for PersistenceConfig {
-    fn default() -> Self {
-        Self {
-            redb: RedbConfig::default(),
-            postgres: PostgresConfig::default(),
-        }
-    }
 }
 
 /// Redb 本地存储配置

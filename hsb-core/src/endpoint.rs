@@ -12,20 +12,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 /// 端点生命周期状态
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EndpointLifecycleStatus {
     Draft,
+    #[default]
     Active,
     Disabled,
     Deprecated,
     Retired,
-}
-
-impl Default for EndpointLifecycleStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 impl std::str::FromStr for EndpointLifecycleStatus {
@@ -367,10 +362,11 @@ impl ConnectionConfig {
 }
 
 /// 认证配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthConfig {
     /// 无认证
+    #[default]
     None,
 
     /// 基本认证
@@ -402,12 +398,6 @@ pub enum AuthConfig {
         sso_endpoint: String,
         app_id: String,
     },
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl AuthConfig {

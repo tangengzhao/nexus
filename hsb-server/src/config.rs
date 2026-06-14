@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{env, path::Path};
 
 /// 服务器配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerConfig {
     /// 服务器基本配置
     pub server: ServerSettings,
@@ -34,27 +34,6 @@ pub struct ServerConfig {
     pub reliability: ReliabilitySettings,
     /// 日志配置
     pub logging: LoggingSettings,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerSettings::default(),
-            http: HttpSettings::default(),
-            tcp: TcpSettings::default(),
-            grpc: GrpcSettings::default(),
-            database: DatabaseSettings::default(),
-            cache: CacheSettings::default(),
-            mq: MqSettings::default(),
-            kafka: KafkaSettings::default(),
-            nats: NatsSettings::default(),
-            persistence: PersistenceSettings::default(),
-            sso: SsoSettings::default(),
-            audit: AuditSettings::default(),
-            reliability: ReliabilitySettings::default(),
-            logging: LoggingSettings::default(),
-        }
-    }
 }
 
 impl ServerConfig {

@@ -203,33 +203,25 @@ impl DeadLetterQueue for InMemoryDlq {
             .values()
             .filter(|dl| {
                 // 应用过滤条件
-                if let Some(ref source) = filter.source_system {
-                    if dl.message.source_system.to_string() != *source {
+                if let Some(ref source) = filter.source_system && dl.message.source_system.to_string() != *source {
                         return false;
                     }
-                }
-                if let Some(ref target) = filter.target_system {
-                    if dl.target_system.as_ref() != Some(target) {
+                if let Some(ref target) = filter.target_system && dl.target_system.as_ref() != Some(target) {
                         return false;
                     }
-                }
-                if let Some(from) = filter.from_time {
-                    if dl.dead_lettered_at < from {
+                if let Some(from) = filter.from_time && dl.dead_lettered_at < from {
                         return false;
                     }
-                }
-                if let Some(to) = filter.to_time {
-                    if dl.dead_lettered_at > to {
+                if let Some(to) = filter.to_time && dl.dead_lettered_at > to {
                         return false;
                     }
-                }
                 true
             })
             .cloned()
             .collect();
 
         // 按时间排序
-        result.sort_by(|a, b| b.dead_lettered_at.cmp(&a.dead_lettered_at));
+        result.sort_by_key(|letter| std::cmp::Reverse(letter.dead_lettered_at));
 
         // 应用分页
         let offset = filter.offset.unwrap_or(0);

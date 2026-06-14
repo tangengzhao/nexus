@@ -66,10 +66,8 @@ impl SoapParser {
                         in_body = false;
                     }
                 }
-                Ok(Event::Text(e)) => {
-                    if in_body {
-                        body_content.push_str(&e.unescape().unwrap_or_default());
-                    }
+                Ok(Event::Text(e)) if in_body => {
+                    body_content.push_str(&e.unescape().unwrap_or_default());
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => {

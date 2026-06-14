@@ -595,6 +595,7 @@ impl PgStore {
     }
 
     /// 保存死信记录
+    #[allow(clippy::too_many_arguments)]
     pub async fn save_dead_letter(
         &self,
         id: &str,
@@ -628,6 +629,7 @@ impl PgStore {
     }
 
     /// 保存审计日志
+    #[allow(clippy::too_many_arguments)]
     pub async fn save_audit_log(
         &self,
         id: &str,

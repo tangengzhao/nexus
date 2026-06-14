@@ -78,26 +78,20 @@ impl SourceMatch {
     /// 检查是否匹配消息
     pub fn matches(&self, msg: &Message) -> bool {
         // 检查系统 ID
-        if let Some(ref id) = self.system_id {
-            if id != "*" && id != msg.source_system.as_str() {
-                return false;
-            }
+        if let Some(ref id) = self.system_id && id != "*" && id != msg.source_system.as_str() {
+            return false;
         }
 
         // 检查协议
-        if let Some(protocol) = self.protocol {
-            if protocol != msg.protocol {
-                return false;
-            }
+        if let Some(protocol) = self.protocol && protocol != msg.protocol {
+            return false;
         }
 
         // 检查消息类型
         if let Some(ref pattern) = self.message_type_pattern {
             if let Some(ref msg_type) = msg.message_type {
-                if let Ok(regex) = Regex::new(pattern) {
-                    if !regex.is_match(msg_type) {
-                        return false;
-                    }
+                if let Ok(regex) = Regex::new(pattern) && !regex.is_match(msg_type) {
+                    return false;
                 }
             } else {
                 return false;

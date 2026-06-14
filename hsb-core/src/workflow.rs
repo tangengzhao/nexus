@@ -798,7 +798,7 @@ impl WorkflowExecutor for InMemoryWorkflowExecutor {
 
     async fn list_instances(&self) -> HsbResult<Vec<WorkflowInstance>> {
         let mut instances: Vec<_> = self.instances.read().await.values().cloned().collect();
-        instances.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        instances.sort_by_key(|inst| std::cmp::Reverse(inst.created_at));
         Ok(instances)
     }
 

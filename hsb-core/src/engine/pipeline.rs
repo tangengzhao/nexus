@@ -137,7 +137,7 @@ impl TransformProcessor {
     pub fn new(transformers: Vec<Arc<dyn Transformer>>) -> Self {
         let mut chain = TransformerChain::new();
         for transformer in transformers {
-            chain = chain.add(transformer);
+            chain = chain.push(transformer);
         }
         Self { chain }
     }
@@ -234,11 +234,9 @@ impl MessageProcessor for LoggingProcessor {
             "Processing message"
         );
 
-        if self.log_payload {
-            if let Some(ref payload) = msg.payload {
+        if self.log_payload && let Some(ref payload) = msg.payload {
                 info!(payload = %payload, "Message payload");
             }
-        }
 
         Ok(())
     }

@@ -13,7 +13,7 @@ use hsb_core::persistence::{
 };
 use hsb_core::reliability::{CircuitBreakerRegistry, DeadLetter, DeadLetterQueue, DeadLetterStats};
 use hsb_core::workflow::{
-    CompensationPolicy, Workflow, WorkflowExecutor, WorkflowInstance, WorkflowOptions, WorkflowStep,
+    CompensationPolicy, Workflow, WorkflowExecutor, WorkflowInstance, WorkflowStep,
 };
 use hsb_core::{
     AuthConfig, DeliveryMode, Endpoint, EndpointLifecycleStatus, EndpointRuntimeStatus,
@@ -101,6 +101,7 @@ pub struct AdminState {
 }
 
 impl AdminState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         router: Arc<dyn Router>,
         route_store: Option<Arc<dyn RouteStore>>,
@@ -931,7 +932,7 @@ impl AdminState {
         }
 
         let endpoints = self.endpoints.read().await;
-        Ok(endpoints.get(id).map(|e| endpoint_info_to_response(e)))
+        Ok(endpoints.get(id).map(endpoint_info_to_response))
     }
 
     pub async fn create_endpoint(&self, req: CreateEndpointRequest) -> HsbResult<EndpointResponse> {
@@ -970,7 +971,7 @@ impl AdminState {
         endpoint.auth = req.auth;
         endpoint.config = req.config.unwrap_or_default();
         endpoint.enabled = req.enabled.unwrap_or(true);
-        endpoint.lifecycle_status = req.lifecycle_status.unwrap_or_else(|| {
+        endpoint.lifecycle_status = req.lifecycle_status.unwrap_or({
             if endpoint.enabled {
                 EndpointLifecycleStatus::Active
             } else {
@@ -1389,7 +1390,7 @@ impl AdminState {
             filtered
                 .retain(|instance| workflow_status_label(instance) == status.to_ascii_uppercase());
         }
-        filtered.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        filtered.sort_by_key(|inst| std::cmp::Reverse(inst.created_at));
 
         let offset = params.offset.unwrap_or(0);
         let limit = Self::bounded_limit(params.limit);
@@ -1405,10 +1406,10 @@ impl AdminState {
         &self,
         id: &str,
     ) -> HsbResult<Option<WorkflowInstanceResponse>> {
-        if let Some(executor) = &self.workflow_executor {
-            if let Some(instance) = executor.get_instance(parse_instance_id(id)?).await? {
-                return Ok(Some(workflow_instance_to_response(instance)));
-            }
+        if let Some(executor) = &self.workflow_executor
+            && let Some(instance) = executor.get_instance(parse_instance_id(id)?).await?
+        {
+            return Ok(Some(workflow_instance_to_response(instance)));
         }
 
         if let Some(store) = &self.workflow_store {
@@ -2018,7 +2019,7 @@ fn build_workflow_from_create(req: CreateWorkflowRequest) -> HsbResult<Workflow>
         timeout: Duration::from_millis(req.timeout_ms.unwrap_or(3_600_000)),
         compensation: req.compensation.map(compensation_policy_from_payload),
         enabled: req.enabled.unwrap_or(true),
-        options: req.options.unwrap_or_else(WorkflowOptions::default),
+        options: req.options.unwrap_or_default(),
     })
 }
 

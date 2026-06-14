@@ -27,7 +27,7 @@ fn create_test_message() -> Message {
 fn create_test_route(id: &str, source: &str, target: &str) -> Route {
     RouteBuilder::new()
         .id(id)
-        .name(&format!("{} to {} Route", source, target))
+        .name(format!("{} to {} Route", source, target).as_str())
         .source(SourceMatch {
             system_id: Some(source.to_string()),
             protocol: Some(ProtocolType::Hl7V2),

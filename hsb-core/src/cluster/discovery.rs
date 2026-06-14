@@ -118,11 +118,9 @@ impl ServiceDiscovery {
                 }
             };
             while let Some(msg) = futures_lite::StreamExt::next(&mut sub).await {
-                if let Ok(peer) = serde_json::from_slice::<PeerInfo>(&msg.payload) {
-                    if peer.instance_id != self_id {
+                if let Ok(peer) = serde_json::from_slice::<PeerInfo>(&msg.payload) && peer.instance_id != self_id {
                         peers.write().await.insert(peer.instance_id.clone(), peer);
                     }
-                }
             }
         });
 

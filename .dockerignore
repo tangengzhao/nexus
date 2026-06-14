@@ -1,0 +1,24 @@
+# 忽略整个 target/ 目录，但保留预编译二进制（供 BUILDMODE=prebuilt 使用）
+target/
+!target/release/hsb-server
+
+# 版本控制
+.git/
+.gitignore
+
+# 日志与临时文件
+logs/
+*.log
+*.pid
+
+# 数据文件（运行时产生，由 volume mount 提供）
+data/*.redb
+
+# IDE 配置
+.idea/
+.vscode/
+*.iml
+
+# 文档（不需要进镜像）
+docs/
+deploy/

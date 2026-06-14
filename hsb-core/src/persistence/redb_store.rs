@@ -166,43 +166,29 @@ impl PersistentMessageStore for RedbStore {
                     Err(_) => continue,
                 };
 
-                if let Some(source_system) = &query.source_system {
-                    if msg.source_system.as_str() != source_system {
+                if let Some(source_system) = &query.source_system && msg.source_system.as_str() != source_system {
                         continue;
                     }
-                }
-                if let Some(target_system) = &query.target_system {
-                    if msg.target_system.as_ref().map(|value| value.as_str())
-                        != Some(target_system.as_str())
-                    {
+                if let Some(target_system) = &query.target_system && msg.target_system.as_ref().map(|value| value.as_str()) != Some(target_system.as_str()) {
                         continue;
                     }
-                }
-                if let Some(message_type) = &query.message_type {
-                    if msg.message_type.as_deref() != Some(message_type.as_str()) {
+                if let Some(message_type) = &query.message_type && msg.message_type.as_deref() != Some(message_type.as_str()) {
                         continue;
                     }
-                }
-                if let Some(status) = &query.status {
-                    if !format!("{:?}", msg.status).eq_ignore_ascii_case(status) {
+                if let Some(status) = &query.status && !format!("{:?}", msg.status).eq_ignore_ascii_case(status) {
                         continue;
                     }
-                }
-                if let Some(from_time) = query.from_time {
-                    if msg.created_at < from_time {
+                if let Some(from_time) = query.from_time && msg.created_at < from_time {
                         continue;
                     }
-                }
-                if let Some(to_time) = query.to_time {
-                    if msg.created_at > to_time {
+                if let Some(to_time) = query.to_time && msg.created_at > to_time {
                         continue;
                     }
-                }
 
                 messages.push(msg);
             }
 
-            messages.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+            messages.sort_by_key(|msg| std::cmp::Reverse(msg.created_at));
 
             let offset = query.offset.unwrap_or(0);
             let limit = query.limit.unwrap_or(messages.len());
@@ -306,11 +292,9 @@ impl PersistentMessageStore for RedbStore {
                 let (_, value) = entry.map_err(|e| HsbError::DatabaseError {
                     message: format!("Redb iter entry failed: {}", e),
                 })?;
-                if let Ok(msg) = serde_json::from_slice::<Message>(value.value()) {
-                    if !msg.status.is_terminal() {
+                if let Ok(msg) = serde_json::from_slice::<Message>(value.value()) && !msg.status.is_terminal() {
                         messages.push(msg);
                     }
-                }
             }
 
             Ok(messages)

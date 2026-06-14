@@ -36,39 +36,29 @@ impl DicomParser {
         let mut payload = serde_json::Map::new();
 
         // Patient ID
-        if let Ok(element) = obj.element_by_name("PatientID") {
-            if let Ok(value) = element.to_str() {
+        if let Ok(element) = obj.element_by_name("PatientID") && let Ok(value) = element.to_str() {
                 payload.insert("PatientID".to_string(), json!(value.to_string()));
             }
-        }
 
         // Patient Name
-        if let Ok(element) = obj.element_by_name("PatientName") {
-            if let Ok(value) = element.to_str() {
+        if let Ok(element) = obj.element_by_name("PatientName") && let Ok(value) = element.to_str() {
                 payload.insert("PatientName".to_string(), json!(value.to_string()));
             }
-        }
 
         // Study Instance UID
-        if let Ok(element) = obj.element_by_name("StudyInstanceUID") {
-            if let Ok(value) = element.to_str() {
+        if let Ok(element) = obj.element_by_name("StudyInstanceUID") && let Ok(value) = element.to_str() {
                 payload.insert("StudyInstanceUID".to_string(), json!(value.to_string()));
             }
-        }
 
         // Series Instance UID
-        if let Ok(element) = obj.element_by_name("SeriesInstanceUID") {
-            if let Ok(value) = element.to_str() {
+        if let Ok(element) = obj.element_by_name("SeriesInstanceUID") && let Ok(value) = element.to_str() {
                 payload.insert("SeriesInstanceUID".to_string(), json!(value.to_string()));
             }
-        }
 
         // SOP Instance UID
-        if let Ok(element) = obj.element_by_name("SOPInstanceUID") {
-            if let Ok(value) = element.to_str() {
+        if let Ok(element) = obj.element_by_name("SOPInstanceUID") && let Ok(value) = element.to_str() {
                 payload.insert("SOPInstanceUID".to_string(), json!(value.to_string()));
             }
-        }
 
         // SOP Class UID
         let sop_class = if let Ok(element) = obj.element_by_name("SOPClassUID") {
@@ -78,25 +68,19 @@ impl DicomParser {
         };
 
         // Modality
-        if let Ok(element) = obj.element_by_name("Modality") {
-            if let Ok(value) = element.to_str() {
+        if let Ok(element) = obj.element_by_name("Modality") && let Ok(value) = element.to_str() {
                 payload.insert("Modality".to_string(), json!(value.to_string()));
             }
-        }
 
         // Study Date
-        if let Ok(element) = obj.element_by_name("StudyDate") {
-            if let Ok(value) = element.to_str() {
+        if let Ok(element) = obj.element_by_name("StudyDate") && let Ok(value) = element.to_str() {
                 payload.insert("StudyDate".to_string(), json!(value.to_string()));
             }
-        }
 
         // Accession Number
-        if let Ok(element) = obj.element_by_name("AccessionNumber") {
-            if let Ok(value) = element.to_str() {
+        if let Ok(element) = obj.element_by_name("AccessionNumber") && let Ok(value) = element.to_str() {
                 payload.insert("AccessionNumber".to_string(), json!(value.to_string()));
             }
-        }
 
         // 获取患者 ID
         let patient_id = payload
