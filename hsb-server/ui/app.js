@@ -52,6 +52,7 @@ const navGroups = [
       { index: '/protocols', title: '自定义协议' },
       { index: '/routes', title: '路由管理' },
       { index: '/endpoints', title: '端点管理' },
+      { index: '/mcp', title: 'MCP 网关' },
       { index: '/workflows', title: '工作流定义' },
     ],
   },
@@ -60,6 +61,7 @@ const navGroups = [
     title: '运行运维',
     children: [
       { index: '/messages', title: '消息中心' },
+      { index: '/manual-message', title: '消息录入' },
       { index: '/dlq', title: '死信队列' },
       { index: '/audit', title: '审计追踪' },
       { index: '/system', title: '系统配置' },
@@ -80,6 +82,7 @@ const protocolOptions = [
   'MESSAGE_QUEUE',
   'DATABASE',
   'OPENAI',
+  'MCP',
   'CUSTOM',
 ];
 
@@ -155,6 +158,63 @@ const webhookMethodOptions = [
 ];
 
 const routePriorityOptions = [1, 10, 50, 100, 500, 1000];
+
+// 分拣条件可选的消息字段：固定字段直接选择，报文字段/报文头需要填写路径
+const branchFieldKinds = [
+  { key: 'message_type', label: '消息类型', source: 'message_field', path: 'message_type' },
+  { key: 'source_system', label: '来源系统', source: 'message_field', path: 'source_system' },
+  { key: 'protocol', label: '协议', source: 'message_field', path: 'protocol' },
+  { key: 'priority', label: '消息优先级', source: 'message_field', path: 'priority' },
+  { key: 'correlation_id', label: '关联 ID', source: 'message_field', path: 'correlation_id' },
+  { key: 'patient_id', label: '患者 ID', source: 'metadata', path: 'patient_id' },
+  { key: 'visit_id', label: '就诊号', source: 'metadata', path: 'visit_id' },
+  { key: 'order_id', label: '医嘱号', source: 'metadata', path: 'order_id' },
+  { key: 'department_code', label: '科室代码', source: 'metadata', path: 'department_code' },
+  { key: 'payload', label: '报文字段（JSON / HL7）', source: 'payload', path: '', custom: true, placeholder: '如 order.type、PV1.PV1_2、PID.PID_5.0' },
+  { key: 'header', label: '报文头 Header', source: 'header', path: '', custom: true, placeholder: '如 Content-Type、X-Dept' },
+];
+
+const branchOperatorOptions = [
+  { value: 'equals', label: '等于' },
+  { value: 'not_equals', label: '不等于' },
+  { value: 'contains', label: '包含' },
+  { value: 'starts_with', label: '开头是' },
+  { value: 'ends_with', label: '结尾是' },
+  { value: 'in', label: '属于（逗号分隔多个值）' },
+  { value: 'not_in', label: '不属于（逗号分隔多个值）' },
+  { value: 'greater_than', label: '大于' },
+  { value: 'less_than', label: '小于' },
+  { value: 'regex', label: '匹配正则' },
+  { value: 'exists', label: '有值' },
+  { value: 'not_exists', label: '无值' },
+];
+
+function branchFieldKind(key) {
+  return branchFieldKinds.find((item) => item.key === key) || branchFieldKinds[0];
+}
+
+function branchOperatorNeedsValue(operator) {
+  return operator !== 'exists' && operator !== 'not_exists';
+}
+
+function newBranchCondition() {
+  return { kind: 'message_type', field_path: '', operator: 'equals', value: '' };
+}
+
+function newRouteBranch(index) {
+  return { name: `分支${index}`, logic: 'and', conditions: [newBranchCondition()], targets: [] };
+}
+
+function branchConditionFromRule(rule) {
+  const fixed = branchFieldKinds.find((item) => !item.custom && item.source === rule.source && item.path === rule.field_path);
+  const kind = fixed || branchFieldKinds.find((item) => item.custom && item.source === rule.source) || branchFieldKinds[0];
+  return {
+    kind: kind.key,
+    field_path: kind.custom ? rule.field_path || '' : '',
+    operator: rule.operator || 'equals',
+    value: rule.value || '',
+  };
+}
 
 function optionLabel(options, value) {
   const item = options.find((entry) => entry.value === value);
@@ -425,6 +485,24 @@ function endpointPayloadFromForm(form) {
     delete properties.project;
   }
 
+  if (form.protocol === 'MCP') {
+    const prefix = (form.mcp_tool_prefix || '').trim();
+    if (prefix && !/^[A-Za-z0-9-]+(_[A-Za-z0-9-]+)*$/.test(prefix)) {
+      throw new Error('工具前缀只能包含字母、数字、- 和单个 _，且不能以 _ 开头或结尾');
+    }
+    const timeout = Number(form.mcp_timeout_secs);
+    if (!Number.isInteger(timeout) || timeout <= 0) {
+      throw new Error('MCP 调用超时必须是大于 0 的整数（秒）');
+    }
+    properties.mcp_tool_prefix = prefix;
+    properties.mcp_allowed_tools = (form.mcp_allowed_tools || '').trim();
+    properties.mcp_timeout_secs = String(timeout);
+  } else {
+    delete properties.mcp_tool_prefix;
+    delete properties.mcp_allowed_tools;
+    delete properties.mcp_timeout_secs;
+  }
+
   if (form.protocol === 'WEBHOOK') {
     properties.webhook_method = form.webhook_method || 'POST';
     properties.webhook_event = form.webhook_event || '';
@@ -496,54 +574,89 @@ function endpointPayloadFromForm(form) {
   return payload;
 }
 
+function branchConditionToRule(condition) {
+  const kind = branchFieldKind(condition.kind);
+  const fieldPath = kind.custom ? (condition.field_path || '').trim() : kind.path;
+  return {
+    name: fieldPath,
+    source: kind.source,
+    field_path: fieldPath,
+    operator: condition.operator,
+    value: branchOperatorNeedsValue(condition.operator) ? (condition.value || '').trim() : '',
+    negate: false,
+  };
+}
+
 function routePayloadFromForm(form) {
-  const metadata = parseJsonOrDefault(form.metadataText, {});
-  const conditions = [];
-
-  if (form.source_pattern) {
-    conditions.push({
-      field: 'source',
-      operator: 'matches',
-      value: form.source_pattern,
-    });
-  }
-
-  if (form.message_type) {
-    conditions.push({
-      field: 'message_type',
-      operator: 'eq',
-      value: form.message_type,
-    });
-  }
-
-  if (form.protocol) {
-    conditions.push({
-      field: 'protocol',
-      operator: 'eq',
-      value: form.protocol,
-    });
-  }
-
-  const routeTargets = form.target_ids
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((endpoint_id) => ({ endpoint_id, weight: 100 }));
+  const routeTargets = form.target_ids.map((endpoint) => ({ endpoint }));
+  const branches = form.branches.map((branch) => ({
+    name: (branch.name || '').trim() || null,
+    logic: branch.logic,
+    conditions: branch.conditions.map(branchConditionToRule),
+    targets: branch.targets.map((endpoint) => ({ endpoint })),
+  }));
 
   return {
     name: form.name,
     description: form.description || null,
     enabled: form.enabled,
-    priority: Number(form.priority || 100),
-    source: {
-      system_type: form.system_type || null,
-      endpoint_id: form.source_endpoint_id || null,
-      pattern: form.source_pattern || null,
-    },
-    conditions,
+    priority: Number(form.priority || 0),
+    source_system: form.source_system.trim() || null,
+    protocol: form.protocol || null,
+    message_type: form.message_type.trim() || null,
     targets: routeTargets,
-    metadata,
+    branches,
+    reply_mode: form.reply_mode,
+    callback_url: form.reply_mode === 'deferred' ? form.callback_url.trim() : '',
+    reply_timeout_secs: Math.max(1, Math.round(Number(form.reply_timeout_hours || 24) * 3600)),
   };
+}
+
+function validateRouteForm(form) {
+  if (!form.name || !form.name.trim()) {
+    return '请填写路由名称';
+  }
+  if (!form.branches.length && !form.target_ids.length) {
+    return '请至少选择一个目标端点（或配置分拣分支）';
+  }
+  for (const [index, branch] of form.branches.entries()) {
+    const label = `分支“${(branch.name || '').trim() || index + 1}”`;
+    if (!branch.conditions.length) {
+      return `${label}至少需要一个条件`;
+    }
+    for (const condition of branch.conditions) {
+      const kind = branchFieldKind(condition.kind);
+      if (kind.custom && !(condition.field_path || '').trim()) {
+        return `${label}：请填写“${kind.label}”的字段路径`;
+      }
+      if (branchOperatorNeedsValue(condition.operator) && !(condition.value || '').trim()) {
+        return `${label}：请填写条件值`;
+      }
+      if (condition.operator === 'regex') {
+        try {
+          new RegExp(condition.value);
+        } catch (error) {
+          return `${label}：正则表达式无效`;
+        }
+      }
+    }
+    if (!branch.targets.length) {
+      return `${label}至少需要选择一个出口端点`;
+    }
+  }
+  if (form.reply_mode === 'deferred') {
+    const url = (form.callback_url || '').trim();
+    if (!url) {
+      return '延时回复必须填写入口端的回调 URL';
+    }
+    if (!/^https?:\/\/[^\s/]+\S*$/i.test(url)) {
+      return '回调 URL 必须是合法的 http:// 或 https:// 地址';
+    }
+    if (!(Number(form.reply_timeout_hours) > 0)) {
+      return '回复等待时长必须大于 0';
+    }
+  }
+  return '';
 }
 
 function buildAuthConfig(form) {
@@ -632,6 +745,9 @@ function endpointFormFromItem(item = {}) {
     openai_model: item.properties?.model || 'gpt-4o-mini',
     openai_organization: item.properties?.organization || '',
     openai_project: item.properties?.project || '',
+    mcp_tool_prefix: item.properties?.mcp_tool_prefix || '',
+    mcp_allowed_tools: item.properties?.mcp_allowed_tools || '',
+    mcp_timeout_secs: Number(item.properties?.mcp_timeout_secs) || 30,
     webhook_method: item.properties?.webhook_method || 'POST',
     webhook_event: item.properties?.webhook_event || '',
     webhook_signature_header: item.properties?.signature_header || 'X-HSB-Signature',
@@ -682,25 +798,29 @@ function endpointFormFromItem(item = {}) {
 }
 
 function routeFormFromItem(item) {
-  const conditions = Array.isArray(item.conditions) ? item.conditions : [];
-  const sourceCondition = conditions.find((entry) => entry.field === 'source');
-  const protocolCondition = conditions.find((entry) => entry.field === 'protocol');
-  const messageTypeCondition = conditions.find((entry) => entry.field === 'message_type');
   return {
     id: item.id || '',
     name: item.name || '',
     description: item.description || '',
     enabled: item.enabled !== false,
-    priority: item.priority || 100,
-    system_type: item.source?.system_type || '',
-    source_endpoint_id: item.source?.endpoint_id || '',
-    source_pattern: item.source?.pattern || sourceCondition?.value || '',
-    protocol: protocolCondition?.value || '',
-    message_type: messageTypeCondition?.value || '',
+    priority: item.priority || 0,
+    source_system: item.source_system || '',
+    protocol: item.protocol || '',
+    message_type: item.message_type || '',
     target_ids: Array.isArray(item.targets)
-      ? item.targets.map((target) => target.endpoint_id).join(', ')
-      : '',
-    metadataText: stringifyPretty(item.metadata || {}),
+      ? item.targets.map((target) => target.endpoint || target.endpoint_id).filter(Boolean)
+      : [],
+    branches: Array.isArray(item.branches)
+      ? item.branches.map((branch) => ({
+          name: branch.name || '',
+          logic: branch.logic === 'or' ? 'or' : 'and',
+          conditions: (branch.conditions || []).map(branchConditionFromRule),
+          targets: (branch.targets || []).map((target) => target.endpoint || target.endpoint_id).filter(Boolean),
+        }))
+      : [],
+    reply_mode: item.reply_mode === 'deferred' ? 'deferred' : 'realtime',
+    callback_url: item.callback_url || '',
+    reply_timeout_hours: item.reply_timeout_secs ? Number((item.reply_timeout_secs / 3600).toFixed(2)) : 24,
   };
 }
 
@@ -1983,6 +2103,9 @@ const EndpointsPage = {
           form.auth_type = 'bearer';
         }
       }
+      if (protocol === 'MCP') {
+        form.path = form.path || '/mcp';
+      }
       if (protocol === 'WEBHOOK') {
         form.port = defaultPortByProtocol(protocol, form.tls_enabled);
         form.path = form.path || '/webhook';
@@ -2266,6 +2389,20 @@ const EndpointsPage = {
             <el-form-item label="Organization"><el-input v-model="form.openai_organization" placeholder="可选" /></el-form-item>
             <el-form-item label="Project"><el-input v-model="form.openai_project" placeholder="可选" /></el-form-item>
           </div>
+
+          <template v-if="form.protocol === 'MCP'">
+            <div class="filters-grid">
+              <el-form-item label="工具前缀">
+                <el-input v-model="form.mcp_tool_prefix" placeholder="留空则使用端点 ID，如 his" />
+              </el-form-item>
+              <el-form-item label="调用超时（秒）"><el-input-number v-model="form.mcp_timeout_secs" :min="1" :max="600" /></el-form-item>
+              <el-form-item label="允许暴露的工具（逗号分隔，留空为全部）">
+                <el-input v-model="form.mcp_allowed_tools" placeholder="get_patient, query_orders" />
+              </el-form-item>
+            </div>
+            <el-alert type="info" :closable="false" show-icon style="margin-bottom: 18px;"
+              title="MCP 端点指向下游 MCP Server 的 Streamable HTTP 地址（主机、端口、路径如 /mcp）。智能体只需连接总线的 MCP 网关，即可以“工具前缀__工具名”的形式调用所有 MCP 端点的工具；下游需要认证时在“认证”中配置 Bearer / API Key。" />
+          </template>
 
           <div class="filters-grid" v-if="form.protocol === 'WEBHOOK'">
             <el-form-item label="事件类型"><el-input v-model="form.webhook_event" placeholder="patient.admit、order.created 等" /></el-form-item>
@@ -2956,6 +3093,11 @@ const RoutesPage = {
     }
 
     async function save() {
+      const validationError = validateRouteForm(form);
+      if (validationError) {
+        ElMessage.warning(validationError);
+        return;
+      }
       try {
         submitting.value = true;
         const payload = routePayloadFromForm(form);
@@ -3022,7 +3164,7 @@ const RoutesPage = {
         if (filters.system_type && item.source?.system_type !== filters.system_type) {
           return false;
         }
-        if (filters.protocol && item.source?.protocol !== filters.protocol) {
+        if (filters.protocol && item.protocol !== filters.protocol) {
           return false;
         }
         if (filters.enabled !== '') {
@@ -3035,10 +3177,10 @@ const RoutesPage = {
           'id',
           'name',
           'description',
-          (value) => value.source?.endpoint_id,
-          (value) => value.source?.pattern,
-          (value) => value.source?.message_type,
-          (value) => (value.targets || []).map((target) => [target.endpoint_id, endpointNames.value.get(target.endpoint_id)]),
+          'source_system',
+          'message_type',
+          'callback_url',
+          (value) => (value.targets || []).map((target) => [target.endpoint, endpointNames.value.get(target.endpoint)]),
         ]);
       });
     });
@@ -3048,9 +3190,61 @@ const RoutesPage = {
       Object.assign(filters, { keyword: '', system_type: '', protocol: '', enabled: '' });
     }
 
+    const endpointOptions = computed(() =>
+      (endpointResource.state.value.items || []).map((item) => ({
+        value: item.id,
+        label: item.name && item.name !== item.id ? `${item.name}（${item.id}）` : item.id,
+      })),
+    );
+
+    function addBranch() {
+      form.branches.push(newRouteBranch(form.branches.length + 1));
+    }
+
+    function removeBranch(index) {
+      form.branches.splice(index, 1);
+    }
+
+    function moveBranch(index, offset) {
+      const target = index + offset;
+      if (target < 0 || target >= form.branches.length) {
+        return;
+      }
+      const [item] = form.branches.splice(index, 1);
+      form.branches.splice(target, 0, item);
+    }
+
+    function addCondition(branch) {
+      branch.conditions.push(newBranchCondition());
+    }
+
+    function removeCondition(branch, index) {
+      branch.conditions.splice(index, 1);
+    }
+
+    function onKindChange(condition) {
+      condition.field_path = '';
+    }
+
+    const replyUrlExample = computed(
+      () => `${window.location.origin}${withRoutePrefix('/api/messages/reply/')}{回复令牌}`,
+    );
+
     return {
       ...resource,
       ...pager,
+      replyUrlExample,
+      endpointOptions,
+      branchFieldKinds,
+      branchOperatorOptions,
+      branchFieldKind,
+      branchOperatorNeedsValue,
+      addBranch,
+      removeBranch,
+      moveBranch,
+      addCondition,
+      removeCondition,
+      onKindChange,
       endpointResource,
       drawerVisible,
       submitting,
@@ -3113,16 +3307,33 @@ const RoutesPage = {
           <el-table-column prop="priority" label="优先级" width="100" />
           <el-table-column label="来源" min-width="180">
             <template #default="scope">
-              {{ scope.row.source?.system_type || '-' }} / {{ scope.row.source?.endpoint_id || scope.row.source?.pattern || '-' }}
+              {{ scope.row.source_system || '全部' }} / {{ scope.row.protocol || '全部协议' }}{{ scope.row.message_type ? ' / ' + scope.row.message_type : '' }}
             </template>
           </el-table-column>
-          <el-table-column label="目标端点" min-width="220">
+          <el-table-column label="目标端点 / 分拣" min-width="260">
             <template #default="scope">
+              <div v-for="branch in scope.row.branches || []" :key="branch.name" style="margin-bottom: 4px;">
+                <el-tag type="warning" effect="plain">{{ branch.name }}（{{ branch.logic === 'or' ? '任一' : '全部' }}满足 {{ (branch.conditions || []).length }} 条）</el-tag>
+                →
+                <el-tag v-for="target in branch.targets || []" :key="target.endpoint" effect="plain">
+                  {{ endpointNames.get(target.endpoint) || target.endpoint }}
+                </el-tag>
+              </div>
+              <div v-if="(scope.row.branches || []).length && (scope.row.targets || []).length">
+                <el-tag type="info" effect="plain">其他</el-tag> →
+              </div>
               <el-space wrap>
-                <el-tag v-for="target in scope.row.targets || []" :key="target.endpoint_id" effect="plain">
-                  {{ endpointNames.get(target.endpoint_id) || target.endpoint_id }}
+                <el-tag v-for="target in scope.row.targets || []" :key="target.endpoint" effect="plain">
+                  {{ endpointNames.get(target.endpoint) || target.endpoint }}
                 </el-tag>
               </el-space>
+            </template>
+          </el-table-column>
+          <el-table-column label="回复方式" min-width="220">
+            <template #default="scope">
+              <el-tag v-if="scope.row.reply_mode === 'deferred'" type="warning" effect="plain">延时回复 · Webhook</el-tag>
+              <el-tag v-else type="success" effect="plain">实时回复</el-tag>
+              <div v-if="scope.row.reply_mode === 'deferred'" class="page-section-subtitle" style="word-break: break-all;">{{ scope.row.callback_url }}</div>
             </template>
           </el-table-column>
           <el-table-column label="状态" width="120">
@@ -3149,25 +3360,87 @@ const RoutesPage = {
         </div>
       </div>
 
-      <el-drawer v-model="drawerVisible" :title="form.id ? '编辑路由' : '新建路由'" size="720px">
+      <el-drawer v-model="drawerVisible" :title="form.id ? '编辑路由' : '新建路由'" size="900px">
         <el-form label-position="top">
           <div class="filters-grid">
             <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
             <el-form-item label="优先级"><el-select v-model="form.priority"><el-option v-for="item in routePriorityOptions" :key="item" :label="String(item)" :value="item" /></el-select></el-form-item>
-            <el-form-item label="来源系统类型"><el-select v-model="form.system_type" clearable><el-option v-for="item in systemTypeOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item>
-            <el-form-item label="来源端点 ID"><el-input v-model="form.source_endpoint_id" /></el-form-item>
+            <el-form-item label="来源系统 ID"><el-input v-model="form.source_system" placeholder="如 HIS（留空匹配全部）" /></el-form-item>
           </div>
 
           <div class="filters-grid">
-            <el-form-item label="来源匹配表达式"><el-input v-model="form.source_pattern" placeholder="^his-.*" /></el-form-item>
             <el-form-item label="协议"><el-select v-model="form.protocol" clearable><el-option v-for="item in protocolOptions" :key="item" :label="item" :value="item" /></el-select></el-form-item>
-            <el-form-item label="消息类型"><el-input v-model="form.message_type" placeholder="ADT_A01" /></el-form-item>
+            <el-form-item label="消息类型"><el-input v-model="form.message_type" placeholder="ADT^A01（可选）" /></el-form-item>
             <el-form-item label="状态"><el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" /></el-form-item>
           </div>
 
-          <el-form-item label="目标端点 ID 列表（逗号分隔）"><el-input v-model="form.target_ids" placeholder="endpoint-a, endpoint-b" /></el-form-item>
+          <el-divider content-position="left">消息分拣（可选）</el-divider>
+          <p class="page-section-subtitle" style="margin-top: 0;">按消息内容选择出口：分支从上到下依次判断，第一个满足条件的分支生效，不需要编写脚本。同一分支内多个条件可选择“全部满足（且）”或“任一满足（或）”；更复杂的组合可拆成多个分支。</p>
+          <el-card v-for="(branch, bIndex) in form.branches" :key="bIndex" shadow="never" style="margin-bottom: 12px;">
+            <template #header>
+              <div class="header-actions" style="justify-content: space-between;">
+                <el-input v-model="branch.name" placeholder="分支名称，如 检验申请" style="max-width: 260px;" />
+                <el-space>
+                  <el-button link :disabled="bIndex === 0" @click="moveBranch(bIndex, -1)">上移</el-button>
+                  <el-button link :disabled="bIndex === form.branches.length - 1" @click="moveBranch(bIndex, 1)">下移</el-button>
+                  <el-button link type="danger" @click="removeBranch(bIndex)">删除分支</el-button>
+                </el-space>
+              </div>
+            </template>
+            <el-form-item label="条件关系">
+              <el-radio-group v-model="branch.logic">
+                <el-radio-button value="and">全部满足（且 AND）</el-radio-button>
+                <el-radio-button value="or">任一满足（或 OR）</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <div v-for="(condition, cIndex) in branch.conditions" :key="cIndex" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
+              <span style="width: 36px; color: #909399; flex: none;">{{ cIndex === 0 ? '当' : (branch.logic === 'or' ? '或' : '且') }}</span>
+              <el-select v-model="condition.kind" style="width: 190px; flex: none;" @change="onKindChange(condition)">
+                <el-option v-for="kind in branchFieldKinds" :key="kind.key" :label="kind.label" :value="kind.key" />
+              </el-select>
+              <el-input v-if="branchFieldKind(condition.kind).custom" v-model="condition.field_path" :placeholder="branchFieldKind(condition.kind).placeholder" style="width: 220px; flex: none;" />
+              <el-select v-model="condition.operator" style="width: 150px; flex: none;">
+                <el-option v-for="op in branchOperatorOptions" :key="op.value" :label="op.label" :value="op.value" />
+              </el-select>
+              <el-input v-if="branchOperatorNeedsValue(condition.operator)" v-model="condition.value" :placeholder="condition.operator === 'in' || condition.operator === 'not_in' ? '如 LAB,RIS' : '值'" style="flex: 1; min-width: 120px;" />
+              <el-button link type="danger" :disabled="branch.conditions.length <= 1" @click="removeCondition(branch, cIndex)">删除</el-button>
+            </div>
+            <el-button link type="primary" @click="addCondition(branch)">+ 添加条件</el-button>
+            <el-form-item label="则转发到出口端点（首个为主出口，其余为备用）" style="margin-top: 12px;">
+              <el-select v-model="branch.targets" multiple filterable allow-create default-first-option placeholder="选择出口端点" style="width: 100%;">
+                <el-option v-for="item in endpointOptions" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </el-form-item>
+          </el-card>
+          <el-button @click="addBranch" style="margin-bottom: 18px;">+ 添加分拣分支</el-button>
+
+          <el-form-item :label="form.branches.length ? '其他情况（未命中任何分支）默认出口端点，可留空' : '目标端点'">
+            <el-select v-model="form.target_ids" multiple filterable allow-create default-first-option placeholder="选择出口端点" style="width: 100%;">
+              <el-option v-for="item in endpointOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="回复方式">
+            <el-radio-group v-model="form.reply_mode">
+              <el-radio value="realtime">出口端实时回复</el-radio>
+              <el-radio value="deferred">出口端延时回复（Webhook 回调入口端）</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-alert v-if="form.reply_mode === 'realtime'" type="info" :closable="false" show-icon style="margin-bottom: 18px;"
+            title="出口端同步返回的结果会在本次请求的响应中直接带回给入口端。" />
+          <template v-else>
+            <div class="filters-grid">
+              <el-form-item label="入口端回调 URL（必填）"><el-input v-model="form.callback_url" placeholder="https://his.example.com/hsb/callback" /></el-form-item>
+              <el-form-item label="回复等待时长（小时）"><el-input-number v-model="form.reply_timeout_hours" :min="0.1" :step="1" /></el-form-item>
+            </div>
+            <el-alert type="info" :closable="false" show-icon style="margin-bottom: 18px;"
+              title="延时回复：总线向出口端投递时附带请求头 X-HSB-Reply-Token 与 X-HSB-Correlation-Id；出口端处理完成后 POST 回复到下方地址（令牌也可替换为关联 ID），总线会把回复转发（Webhook）到上面的回调 URL。同一事务无需再建回复路由。">
+              <template #default><code style="word-break: break-all;">{{ replyUrlExample }}</code></template>
+            </el-alert>
+          </template>
+          <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 18px;"
+            title="如果入口端系统不支持 Webhook，请保持“实时回复”，并另行新建一条回复路由：以出口端点作为来源（入口）、原入口端作为目标（出口）的普通路由。" />
           <el-form-item label="描述"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item>
-          <el-form-item label="Metadata JSON" class="code-block"><el-input v-model="form.metadataText" type="textarea" /></el-form-item>
         </el-form>
         <template #footer>
           <div class="header-actions">
@@ -3176,6 +3449,447 @@ const RoutesPage = {
           </div>
         </template>
       </el-drawer>
+    </div>
+  `,
+};
+
+const McpGatewayPage = {
+  name: 'McpGatewayPage',
+  setup() {
+    const info = useAsyncResource(async () => apiRequest('/mcp'), { enabled: true });
+    const catalog = useAsyncResource(async () => apiRequest('/mcp/tools'), { tools: [], endpoints: [] });
+    const calls = useAsyncResource(async () => apiRequest('/mcp/calls', { query: { limit: 50 } }), { items: [], total: 0 });
+    const keyword = ref('');
+    const dialogVisible = ref(false);
+    const calling = ref(false);
+    const tester = reactive({ tool: '', description: '', argumentsText: '{}', result: '', error: '' });
+
+    const gatewayUrl = computed(() => `${window.location.origin}${withRoutePrefix(info.state.value.path || '/mcp')}`);
+    const authLabel = computed(() => {
+      const mode = info.state.value.auth_mode;
+      if (mode === 'tokens') return { text: '令牌认证', type: 'success' };
+      if (mode === 'anonymous') return { text: '匿名访问（仅限受信网络）', type: 'warning' };
+      return { text: '未配置令牌，网关拒绝所有调用', type: 'danger' };
+    });
+    const agentConfig = computed(() => JSON.stringify({
+      mcpServers: {
+        'nexus-hsb': {
+          url: gatewayUrl.value,
+          headers: { Authorization: 'Bearer <智能体令牌>' },
+        },
+      },
+    }, null, 2));
+    const curlExample = computed(() => [
+      `curl -X POST ${gatewayUrl.value} \\`,
+      `  -H 'Authorization: Bearer <智能体令牌>' \\`,
+      `  -H 'Content-Type: application/json' \\`,
+      `  -H 'Accept: application/json, text/event-stream' \\`,
+      `  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`,
+    ].join('\n'));
+    const filteredTools = computed(() => {
+      const items = catalog.state.value.tools || [];
+      return items.filter((item) => matchesKeyword(item, keyword.value, ['name', 'endpoint_name', 'description']));
+    });
+
+    async function refreshAll(forceTools = false) {
+      await info.refresh();
+      if (!info.state.value.enabled) {
+        return;
+      }
+      try {
+        catalog.state.loading = true;
+        catalog.state.value = await apiRequest('/mcp/tools', { query: { refresh: forceTools ? 'true' : undefined } });
+      } catch (error) {
+        ElMessage.error(error.message || '加载工具目录失败');
+      } finally {
+        catalog.state.loading = false;
+      }
+      await calls.refresh();
+    }
+
+    function skeletonFromSchema(schema) {
+      const result = {};
+      const properties = schema?.properties || {};
+      Object.entries(properties).forEach(([key, value]) => {
+        const type = Array.isArray(value?.type) ? value.type[0] : value?.type;
+        result[key] = type === 'number' || type === 'integer' ? 0
+          : type === 'boolean' ? false
+          : type === 'array' ? []
+          : type === 'object' ? {}
+          : '';
+      });
+      return result;
+    }
+
+    function openTester(tool) {
+      tester.tool = tool.name;
+      tester.description = tool.description || '';
+      tester.argumentsText = JSON.stringify(skeletonFromSchema(tool.input_schema), null, 2);
+      tester.result = '';
+      tester.error = '';
+      dialogVisible.value = true;
+    }
+
+    async function runTool() {
+      let args;
+      try {
+        args = tester.argumentsText.trim() ? JSON.parse(tester.argumentsText) : {};
+      } catch (error) {
+        ElMessage.warning('参数不是合法的 JSON');
+        return;
+      }
+      try {
+        calling.value = true;
+        tester.error = '';
+        tester.result = '';
+        const result = await apiRequest('/mcp/call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: createJsonBody({ tool: tester.tool, arguments: args }),
+        });
+        tester.result = JSON.stringify(result, null, 2);
+      } catch (error) {
+        tester.error = error.message || '调用失败';
+      } finally {
+        calling.value = false;
+        calls.refresh();
+      }
+    }
+
+    async function copy(text) {
+      try {
+        await copyTextToClipboard(text);
+        ElMessage.success('已复制');
+      } catch (error) {
+        ElMessage.error(error.message || '复制失败');
+      }
+    }
+
+    onMounted(() => refreshAll(false));
+
+    return {
+      info,
+      catalog,
+      calls,
+      keyword,
+      dialogVisible,
+      calling,
+      tester,
+      gatewayUrl,
+      authLabel,
+      agentConfig,
+      curlExample,
+      filteredTools,
+      refreshAll,
+      openTester,
+      runTool,
+      copy,
+      formatTime,
+    };
+  },
+  template: `
+    <div class="content-grid">
+      <div class="page-card">
+        <div class="stack-actions">
+          <div>
+            <h2 class="page-section-title">MCP 网关</h2>
+            <p class="page-section-subtitle">智能体只需连接总线的一个 MCP 地址，即可调用所有 MCP 端点提供的工具。新增 MCP 服务：在“端点管理”创建协议为 MCP 的端点。</p>
+          </div>
+          <div class="toolbar-right">
+            <el-button type="primary" @click="refreshAll(true)">刷新工具目录</el-button>
+          </div>
+        </div>
+
+        <el-alert v-if="!info.state.value.enabled" type="warning" :closable="false" show-icon title="MCP 网关未启用（hsb.toml 的 [mcp] enabled = false）" />
+        <template v-else>
+          <el-descriptions :column="1" border style="margin-top: 12px;">
+            <el-descriptions-item label="网关地址">
+              <code>{{ gatewayUrl }}</code>
+              <el-button link type="primary" @click="copy(gatewayUrl)">复制</el-button>
+            </el-descriptions-item>
+            <el-descriptions-item label="传输方式">Streamable HTTP（POST JSON-RPC 2.0），协议版本 {{ (info.state.value.protocol_versions || []).join(' / ') }}</el-descriptions-item>
+            <el-descriptions-item label="认证方式"><el-tag :type="authLabel.type">{{ authLabel.text }}</el-tag></el-descriptions-item>
+            <el-descriptions-item label="已授权智能体">
+              <el-space wrap>
+                <el-tag v-for="client in info.state.value.clients || []" :key="client.name" effect="plain">
+                  {{ client.name }}（{{ client.allowed_endpoints && client.allowed_endpoints.length ? client.allowed_endpoints.join(', ') : '全部端点' }}）
+                </el-tag>
+                <span v-if="!(info.state.value.clients || []).length">无（在配置文件 [[mcp.clients]] 中添加 name / token / allowed_endpoints）</span>
+              </el-space>
+            </el-descriptions-item>
+            <el-descriptions-item label="智能体配置示例">
+              <pre style="margin: 0; white-space: pre-wrap;">{{ agentConfig }}</pre>
+              <el-button link type="primary" @click="copy(agentConfig)">复制</el-button>
+            </el-descriptions-item>
+            <el-descriptions-item label="命令行验证">
+              <pre style="margin: 0; white-space: pre-wrap;">{{ curlExample }}</pre>
+              <el-button link type="primary" @click="copy(curlExample)">复制</el-button>
+            </el-descriptions-item>
+          </el-descriptions>
+        </template>
+      </div>
+
+      <div class="page-card" v-if="info.state.value.enabled">
+        <h2 class="page-section-title">MCP 服务（下游端点）</h2>
+        <el-table :data="catalog.state.value.endpoints || []" stripe v-loading="catalog.state.loading" row-key="endpoint_id">
+          <el-table-column prop="endpoint_name" label="名称" min-width="150" />
+          <el-table-column prop="endpoint_id" label="端点 ID" min-width="150" />
+          <el-table-column prop="address" label="地址" min-width="220" />
+          <el-table-column prop="prefix" label="工具前缀" width="140" />
+          <el-table-column prop="tool_count" label="工具数" width="90" />
+          <el-table-column label="状态" min-width="220">
+            <template #default="scope">
+              <el-tag v-if="!scope.row.error" type="success">可用</el-tag>
+              <el-tooltip v-else :content="scope.row.error" placement="top"><el-tag type="danger">{{ scope.row.enabled ? '不可用' : '已停用' }}</el-tag></el-tooltip>
+              <span v-if="scope.row.error" class="page-section-subtitle" style="margin-left: 8px;">{{ scope.row.error }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <div class="page-card" v-if="info.state.value.enabled">
+        <div class="stack-actions">
+          <h2 class="page-section-title">聚合工具（{{ (catalog.state.value.tools || []).length }}）</h2>
+          <el-input v-model="keyword" placeholder="搜索工具名、服务、描述" clearable style="max-width: 320px;" />
+        </div>
+        <el-table :data="filteredTools" stripe row-key="name">
+          <el-table-column prop="name" label="工具名（智能体使用）" min-width="240" />
+          <el-table-column prop="endpoint_name" label="所属服务" min-width="140" />
+          <el-table-column prop="description" label="说明" min-width="260" show-overflow-tooltip />
+          <el-table-column label="操作" width="100" fixed="right">
+            <template #default="scope"><el-button link type="primary" @click="openTester(scope.row)">调试</el-button></template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <div class="page-card" v-if="info.state.value.enabled">
+        <h2 class="page-section-title">最近调用</h2>
+        <el-table :data="calls.state.value.items || []" stripe row-key="id">
+          <el-table-column label="时间" width="180"><template #default="scope">{{ formatTime(scope.row.time) }}</template></el-table-column>
+          <el-table-column prop="caller" label="调用方" width="160" />
+          <el-table-column prop="tool" label="工具" min-width="220" />
+          <el-table-column prop="endpoint_id" label="端点" min-width="140" />
+          <el-table-column label="结果" width="90">
+            <template #default="scope"><el-tag :type="scope.row.success ? 'success' : 'danger'">{{ scope.row.success ? '成功' : '失败' }}</el-tag></template>
+          </el-table-column>
+          <el-table-column prop="duration_ms" label="耗时(ms)" width="100" />
+          <el-table-column prop="error" label="错误" min-width="200" show-overflow-tooltip />
+        </el-table>
+      </div>
+
+      <el-dialog v-model="dialogVisible" title="调试 MCP 工具" width="680px">
+        <el-form label-position="top">
+          <el-form-item label="工具"><el-input v-model="tester.tool" disabled /></el-form-item>
+          <p v-if="tester.description" class="page-section-subtitle" style="margin-top: 0;">{{ tester.description }}</p>
+          <el-form-item label="参数（JSON）"><el-input v-model="tester.argumentsText" type="textarea" :rows="8" /></el-form-item>
+        </el-form>
+        <el-alert v-if="tester.error" type="error" :closable="false" show-icon :title="tester.error" style="margin-bottom: 12px;" />
+        <pre v-if="tester.result" style="max-height: 280px; overflow: auto; white-space: pre-wrap;">{{ tester.result }}</pre>
+        <template #footer>
+          <el-button @click="dialogVisible = false">关闭</el-button>
+          <el-button type="primary" :loading="calling" @click="runTool">调用</el-button>
+        </template>
+      </el-dialog>
+    </div>
+  `,
+};
+
+const ManualMessagePage = {
+  name: 'ManualMessagePage',
+  setup() {
+    const priorityOptions = [
+      { value: 'LOW', label: '低' },
+      { value: 'NORMAL', label: '普通' },
+      { value: 'HIGH', label: '高' },
+      { value: 'URGENT', label: '紧急' },
+      { value: 'CRITICAL', label: '最高' },
+    ];
+
+    const medicalProtocols = ['HL7V2', 'HL7V3', 'FHIR_R4', 'FHIR_R5', 'DICOM', 'SOAP'];
+    const form = reactive({
+      source_system: '',
+      target_system: '',
+      protocol: 'HTTP',
+      message_type: '',
+      topic: '',
+      priority: 'NORMAL',
+      correlation_id: '',
+      headersText: '',
+      payloadText: '{\n  "patient_id": "P001"\n}',
+    });
+    const submitting = ref(false);
+    const result = ref(null);
+    const resultVisible = ref(false);
+
+    const isMedicalProtocol = computed(() => medicalProtocols.includes(form.protocol));
+
+    function buildRequest() {
+      let headers = null;
+      if (form.headersText.trim()) {
+        headers = JSON.parse(form.headersText);
+      }
+      const payload = isMedicalProtocol.value
+        ? form.payloadText
+        : JSON.parse(form.payloadText.trim() || 'null');
+      return {
+        source_system: form.source_system.trim(),
+        target_system: form.target_system.trim() || null,
+        protocol: form.protocol,
+        message_type: form.message_type.trim() || null,
+        topic: form.topic.trim() || null,
+        priority: form.priority,
+        correlation_id: form.correlation_id.trim() || null,
+        headers,
+        payload,
+      };
+    }
+
+    async function submit() {
+      let request;
+      try {
+        request = buildRequest();
+      } catch (error) {
+        ElMessage.error(`消息头或消息内容不是合法 JSON：${error.message}`);
+        return;
+      }
+      if (!request.source_system) {
+        ElMessage.warning('请填写来源系统');
+        return;
+      }
+      submitting.value = true;
+      result.value = null;
+      try {
+        result.value = await apiRequest('/messages/manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: createJsonBody(request),
+        });
+        resultVisible.value = true;
+        ElMessage.success(`消息已录入总线：${result.value.message_id}`);
+      } catch (error) {
+        ElMessage.error(error.message || '消息录入失败');
+      } finally {
+        submitting.value = false;
+      }
+    }
+
+    function fillSample() {
+      if (isMedicalProtocol.value) {
+        form.message_type = 'ADT^A01';
+        form.payloadText = 'MSH|^~\\&|MANUAL_HIS|HOSPITAL|NEXUS|HOSPITAL|20260909120000||ADT^A01|MSG00001|P|2.3\rEVN|A01|20260909120000\rPID|1||P001^^^HIS||张三||19700101|M';
+      } else {
+        form.message_type = 'ORDER_CREATE';
+        form.topic = 'medical.order.create.v1';
+        form.payloadText = '{\n  "patient_id": "P001",\n  "patient_name": "张三",\n  "order_id": "ORD-20260909-001",\n  "order_type": "检验"\n}';
+      }
+    }
+
+    function resetForm() {
+      form.source_system = '';
+      form.target_system = '';
+      form.protocol = 'HTTP';
+      form.message_type = '';
+      form.topic = '';
+      form.priority = 'NORMAL';
+      form.correlation_id = '';
+      form.headersText = '';
+      form.payloadText = '{\n  "patient_id": "P001"\n}';
+      result.value = null;
+    }
+
+    return {
+      form,
+      priorityOptions,
+      protocolOptions,
+      isMedicalProtocol,
+      submitting,
+      result,
+      resultVisible,
+      submit,
+      fillSample,
+      resetForm,
+    };
+  },
+  template: `
+    <div class="content-grid">
+      <div class="page-card">
+        <div class="stack-actions">
+          <div>
+            <h2 class="page-section-title">消息录入</h2>
+            <p class="page-section-subtitle">手工输入消息字段与属性构造规范化消息，提交后直接进入总线处理流程（校验、路由、分发），结果实时返回。</p>
+          </div>
+          <div class="toolbar-right">
+            <el-button @click="fillSample">填充示例</el-button>
+            <el-button @click="resetForm">重置</el-button>
+          </div>
+        </div>
+
+        <el-form label-width="110px">
+          <div class="filters-grid">
+            <el-form-item label="来源系统" required>
+              <el-input v-model="form.source_system" placeholder="如 HIS" />
+            </el-form-item>
+            <el-form-item label="目标系统">
+              <el-input v-model="form.target_system" placeholder="如 LIS（可选）" />
+            </el-form-item>
+            <el-form-item label="协议">
+              <el-select v-model="form.protocol">
+                <el-option v-for="item in protocolOptions" :key="item" :label="item" :value="item" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="消息类型">
+              <el-input v-model="form.message_type" placeholder="如 ADT^A01（可选）" />
+            </el-form-item>
+            <el-form-item label="Topic">
+              <el-input v-model="form.topic" placeholder="domain.service.action.version（可选）" />
+            </el-form-item>
+            <el-form-item label="优先级">
+              <el-select v-model="form.priority">
+                <el-option v-for="item in priorityOptions" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="关联ID">
+              <el-input v-model="form.correlation_id" placeholder="correlation id（可选）" />
+            </el-form-item>
+          </div>
+
+          <el-form-item label="附加消息头">
+            <el-input v-model="form.headersText" type="textarea" :rows="3" placeholder='JSON 对象，如 {"X-Dept": "急诊"}（可选）' class="code-block" />
+          </el-form-item>
+
+          <el-form-item label="消息内容" required>
+            <el-input v-model="form.payloadText" type="textarea" :rows="10" class="code-block"
+              :placeholder="isMedicalProtocol ? '粘贴原始协议报文（HL7 ER7 / FHIR JSON / DICOM / SOAP XML）' : 'JSON 内容'" />
+            <div class="form-hint" v-if="isMedicalProtocol">医疗协议按原始报文解析，消息内容应为字符串形式的协议原文。</div>
+            <div class="form-hint" v-else>通用协议按 JSON 解析后进入总线。</div>
+          </el-form-item>
+
+          <el-form-item>
+            <el-button type="primary" :loading="submitting" @click="submit">提交到总线</el-button>
+          </el-form-item>
+        </el-form>
+      </div>
+
+      <el-dialog v-model="resultVisible" title="录入结果" width="760px">
+        <el-descriptions v-if="result" :column="2" border>
+          <el-descriptions-item label="消息ID">{{ result.message_id }}</el-descriptions-item>
+          <el-descriptions-item label="TraceID">{{ result.trace_id }}</el-descriptions-item>
+          <el-descriptions-item label="协议">{{ result.protocol }}</el-descriptions-item>
+          <el-descriptions-item label="命中路由">{{ (result.matched_routes || []).join(', ') || '-' }}</el-descriptions-item>
+        </el-descriptions>
+        <el-table v-if="result" :data="result.deliveries || []" stripe style="margin-top: 16px;">
+          <el-table-column prop="route_id" label="路由" min-width="160" />
+          <el-table-column prop="target" label="目标端点" min-width="160" />
+          <el-table-column prop="branch" label="命中分支" min-width="120" />
+          <el-table-column label="结果" width="100">
+            <template #default="scope">
+              <el-tag :type="scope.row.success ? 'success' : 'danger'">{{ scope.row.success ? '成功' : '失败' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="duration_ms" label="耗时(ms)" width="100" />
+          <el-table-column prop="error" label="错误" min-width="180" />
+        </el-table>
+      </el-dialog>
     </div>
   `,
 };
@@ -4101,8 +4815,10 @@ const routeDefinitions = [
   { path: '/topics', component: TopicsPage, meta: { title: 'Topic 目录', desc: '维护消息主题命名、归属和运行属性。' } },
   { path: '/protocols', component: CustomProtocolsPage, meta: { title: '自定义协议', desc: '维护 CUSTOM 协议字段结构并供端点引用。' } },
   { path: '/endpoints', component: EndpointsPage, meta: { title: '端点管理', desc: '维护系统下的端点、角色、连接与安全策略。' } },
+  { path: '/mcp', component: McpGatewayPage, meta: { title: 'MCP 网关', desc: '让智能体通过总线统一调用多个 MCP 服务的工具。' } },
   { path: '/routes', component: RoutesPage, meta: { title: '路由管理', desc: '维护逻辑分发规则与目标端点映射。' } },
-  { path: '/messages', component: MessagesPage, meta: { title: '消息中心', desc: '查看持久化消息、状态和重放入口。' } },
+      { path: '/messages', component: MessagesPage, meta: { title: '消息中心', desc: '查看持久化消息、状态和重放入口。' } },
+      { path: '/manual-message', component: ManualMessagePage, meta: { title: '消息录入', desc: '手工录入消息字段与属性，构造消息并送入总线处理。' } },
   { path: '/dlq', component: DlqPage, meta: { title: '死信队列', desc: '处理人工介入的失败消息。' } },
   { path: '/audit', component: AuditPage, meta: { title: '审计追踪', desc: '查看审计日志与调用链追踪。' } },
   { path: '/workflows', component: WorkflowsPage, meta: { title: '工作流定义', desc: '预览跨系统业务编排模板。' } },

@@ -196,6 +196,10 @@ pub struct EndpointInfo {
     pub healthy: bool,
     /// 最后心跳时间
     pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
+    /// 出站请求需要附带的认证头（由端点认证配置转换而来）
+    pub headers: HashMap<String, String>,
+    /// 端点扩展属性（如 MCP 的工具前缀、超时）
+    pub properties: HashMap<String, String>,
 }
 
 impl EndpointInfo {
@@ -208,6 +212,19 @@ impl EndpointInfo {
             enabled: true,
             healthy: true,
             last_heartbeat: None,
+            headers: HashMap::new(),
+            properties: HashMap::new(),
         }
+    }
+
+    /// 从完整端点定义填充认证头与扩展属性
+    pub fn with_endpoint_details(mut self, endpoint: &crate::Endpoint) -> Self {
+        self.headers = endpoint
+            .auth
+            .as_ref()
+            .map(|auth| auth.to_headers())
+            .unwrap_or_default();
+        self.properties = endpoint.properties.clone();
+        self
     }
 }

@@ -109,6 +109,7 @@ pub fn create_api_routes(state: Arc<AdminState>) -> Router {
         )
         // 消息管理
         .route("/messages", get(handlers::list_messages))
+        .route("/messages/manual", post(handlers::submit_manual_message))
         .route("/messages/{id}", get(handlers::get_message))
         .route(
             "/messages/{id}/reprocess",
@@ -132,6 +133,11 @@ pub fn create_api_routes(state: Arc<AdminState>) -> Router {
             "/circuit-breakers/{name}/reset",
             post(handlers::reset_circuit_breaker),
         )
+        // MCP 网关
+        .route("/mcp", get(handlers::mcp_info))
+        .route("/mcp/tools", get(handlers::mcp_tools))
+        .route("/mcp/call", post(handlers::mcp_call))
+        .route("/mcp/calls", get(handlers::mcp_calls))
         // 配置
         .route("/config", get(handlers::get_config))
         .route("/config", put(handlers::update_config))

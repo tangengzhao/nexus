@@ -16,9 +16,10 @@ use hsb_core::workflow::{
     CompensationPolicy, Workflow, WorkflowExecutor, WorkflowInstance, WorkflowStep,
 };
 use hsb_core::{
-    AuthConfig, DeliveryMode, Endpoint, EndpointLifecycleStatus, EndpointRuntimeStatus,
-    EndpointSecurity, IntegrationSystem, Message, MessageBuilder, Organization, Route,
-    RouteOptions, RouteTarget, SourceMatch,
+    AuthConfig, ConditionGroup, DEFAULT_REPLY_TIMEOUT_SECS, DeliveryMode, Endpoint,
+    EndpointLifecycleStatus, EndpointRuntimeStatus, EndpointSecurity, IntegrationSystem, Message,
+    MessageBuilder, Organization, ReplyMode, Route, RouteBranch, RouteOptions, RouteTarget,
+    SourceMatch,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,6 +34,9 @@ const MAX_LIST_LIMIT: usize = 500;
 #[async_trait::async_trait]
 pub trait MessageReplayService: Send + Sync {
     async fn replay(&self, message: Message) -> HsbResult<()>;
+
+    /// 手动录入：按结构化字段构造消息并送入总线处理流程（持久化 -> 管道 -> 路由 -> 分发）
+    async fn submit(&self, request: ManualMessageRequest) -> HsbResult<ManualMessageResponse>;
 }
 
 #[derive(Clone)]
@@ -96,6 +100,8 @@ pub struct AdminState {
     topics: Arc<RwLock<HashMap<String, TopicRecord>>>,
     // 配置
     config: Arc<RwLock<serde_json::Value>>,
+    // MCP 网关（未启用时为 None）
+    mcp_gateway: Option<Arc<hsb_core::mcp::McpGateway>>,
     // 启动时间
     start_time: Instant,
 }
@@ -141,8 +147,19 @@ impl AdminState {
             custom_protocols: Arc::new(RwLock::new(HashMap::new())),
             topics: Arc::new(RwLock::new(HashMap::new())),
             config: Arc::new(RwLock::new(serde_json::json!({}))),
+            mcp_gateway: None,
             start_time: Instant::now(),
         }
+    }
+
+    /// 接入 MCP 网关，开放工具目录与调试调用接口
+    pub fn with_mcp_gateway(mut self, gateway: Option<Arc<hsb_core::mcp::McpGateway>>) -> Self {
+        self.mcp_gateway = gateway;
+        self
+    }
+
+    pub fn mcp_gateway(&self) -> Option<&Arc<hsb_core::mcp::McpGateway>> {
+        self.mcp_gateway.as_ref()
     }
 
     // ============ 自定义协议维护 ============
@@ -860,8 +877,17 @@ impl AdminState {
             route.conditions = conditions;
         }
         if let Some(targets) = req.targets {
-            route.targets = build_route_targets(targets)?;
+            // 已配置分拣分支时允许清空默认出口
+            route.targets = if targets.is_empty() {
+                Vec::new()
+            } else {
+                build_route_targets(targets)?
+            };
         }
+        if let Some(branches) = req.branches {
+            route.branches = build_route_branches(branches)?;
+        }
+        route.validate_branches()?;
         if let Some(transformer_ids) = req.transformer_ids {
             route.transformer_ids = transformer_ids;
         }
@@ -872,7 +898,7 @@ impl AdminState {
             route.enabled = enabled;
         }
 
-        merge_route_options(&mut route.options, &req_for_options);
+        merge_route_options(&mut route.options, &req_for_options)?;
 
         self.router.add_route(route.clone()).await?;
         if let Some(store) = &self.route_store {
@@ -1540,6 +1566,28 @@ impl AdminState {
         replay.replay(message).await
     }
 
+    // ============ 消息手动录入 ============
+
+    pub async fn submit_manual_message(
+        &self,
+        request: ManualMessageRequest,
+    ) -> HsbResult<ManualMessageResponse> {
+        if request.source_system.trim().is_empty() {
+            return Err(HsbError::InvalidField {
+                field: "source_system".to_string(),
+                reason: "来源系统不能为空".to_string(),
+            });
+        }
+        if request.payload.is_null() {
+            return Err(HsbError::InvalidField {
+                field: "payload".to_string(),
+                reason: "消息内容不能为空".to_string(),
+            });
+        }
+        let replay = self.require_message_replay()?;
+        replay.submit(request).await
+    }
+
     // ============ 死信队列 ============
 
     pub async fn list_dlq(&self, params: DlqQueryParams) -> HsbResult<Vec<DlqMessageResponse>> {
@@ -1774,7 +1822,8 @@ impl AdminState {
             &endpoint.name,
             endpoint.protocol,
             &endpoint.address(),
-        );
+        )
+        .with_endpoint_details(endpoint);
         info.enabled = endpoint.enabled;
         info.healthy = status
             .map(|value| value.healthy)
@@ -1847,6 +1896,59 @@ impl AdminState {
 
 // ============ 转换辅助函数 ============
 
+fn route_targets_to_response(targets: &[RouteTarget], timeout_ms: u64) -> Vec<RouteTargetResponse> {
+    targets
+        .iter()
+        .map(|t| RouteTargetResponse {
+            system_id: t.endpoint_id.to_string(),
+            endpoint: t.endpoint_id.to_string(),
+            transport: if t.primary {
+                "primary".to_string()
+            } else if t.fallback {
+                "fallback".to_string()
+            } else {
+                "weighted".to_string()
+            },
+            timeout_secs: timeout_ms / 1000,
+        })
+        .collect()
+}
+
+fn build_route_branches(branches: Vec<RouteBranchRequest>) -> HsbResult<Vec<RouteBranch>> {
+    branches
+        .into_iter()
+        .enumerate()
+        .map(|(index, branch)| {
+            let name = branch
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("分支{}", index + 1));
+            let rules = branch
+                .conditions
+                .into_iter()
+                .map(|mut rule| {
+                    rule.field_path = rule.field_path.trim().to_string();
+                    if rule.name.trim().is_empty() {
+                        rule.name = rule.field_path.clone();
+                    }
+                    rule
+                })
+                .collect();
+            Ok(RouteBranch {
+                name,
+                condition: ConditionGroup {
+                    logic: branch.logic,
+                    rules,
+                },
+                targets: build_route_targets(branch.targets)?,
+            })
+        })
+        .collect()
+}
+
 fn route_to_response(route: &Route) -> RouteResponse {
     RouteResponse {
         id: route.id.to_string(),
@@ -1856,20 +1958,15 @@ fn route_to_response(route: &Route) -> RouteResponse {
         message_type: route.source_match.message_type_pattern.clone(),
         protocol: route.source_match.protocol,
         conditions: route.conditions.clone(),
-        targets: route
-            .targets
+        targets: route_targets_to_response(&route.targets, route.options.timeout_ms),
+        branches: route
+            .branches
             .iter()
-            .map(|t| RouteTargetResponse {
-                system_id: t.endpoint_id.to_string(),
-                endpoint: t.endpoint_id.to_string(),
-                transport: if t.primary {
-                    "primary".to_string()
-                } else if t.fallback {
-                    "fallback".to_string()
-                } else {
-                    "weighted".to_string()
-                },
-                timeout_secs: route.options.timeout_ms / 1000,
+            .map(|branch| RouteBranchResponse {
+                name: branch.name.clone(),
+                logic: branch.condition.logic,
+                conditions: branch.condition.rules.clone(),
+                targets: route_targets_to_response(&branch.targets, route.options.timeout_ms),
             })
             .collect(),
         transformer_ids: route.transformer_ids.clone(),
@@ -1881,19 +1978,38 @@ fn route_to_response(route: &Route) -> RouteResponse {
         require_ack: route.options.require_ack,
         audit_enabled: route.options.audit_enabled,
         dlq_on_failure: route.options.dlq_on_failure,
+        reply_mode: route.options.reply_mode,
+        callback_url: route.options.callback_url.clone(),
+        reply_timeout_secs: route.options.reply_timeout_secs,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
 }
 
 fn build_route_from_create(req: CreateRouteRequest) -> HsbResult<Route> {
-    if req.targets.is_empty() {
-        return Err(HsbError::ValidationError {
-            message: "At least one route target is required".to_string(),
-        });
-    }
+    let branches = build_route_branches(req.branches.unwrap_or_default())?;
+    // 有分拣分支时，默认出口可以为空（未命中任何分支则不投递）
+    let targets = if req.targets.is_empty() && !branches.is_empty() {
+        Vec::new()
+    } else {
+        build_route_targets(req.targets)?
+    };
 
-    Ok(Route {
+    let reply_mode = req.reply_mode.unwrap_or_default();
+    let options = RouteOptions {
+        delivery_mode: req.delivery_mode.unwrap_or(DeliveryMode::AtLeastOnce),
+        timeout_ms: req.timeout_ms.unwrap_or(30_000),
+        async_delivery: req.async_delivery.unwrap_or(false),
+        require_ack: req.require_ack.unwrap_or(true),
+        audit_enabled: req.audit_enabled.unwrap_or(true),
+        dlq_on_failure: req.dlq_on_failure.unwrap_or(true),
+        reply_mode,
+        callback_url: normalized_callback_url(reply_mode, req.callback_url),
+        reply_timeout_secs: req.reply_timeout_secs.unwrap_or(DEFAULT_REPLY_TIMEOUT_SECS),
+    };
+    options.validate_reply()?;
+
+    let route = Route {
         id: hsb_common::RouteId::new(req.id.unwrap_or_else(|| ulid::Ulid::new().to_string())),
         name: req.name,
         description: req.description,
@@ -1903,19 +2019,24 @@ fn build_route_from_create(req: CreateRouteRequest) -> HsbResult<Route> {
             message_type_pattern: req.message_type,
         },
         conditions: req.conditions.unwrap_or_default(),
-        targets: build_route_targets(req.targets)?,
+        targets,
+        branches,
         transformer_ids: req.transformer_ids.unwrap_or_default(),
         priority: req.priority.unwrap_or(0),
         enabled: req.enabled.unwrap_or(true),
-        options: RouteOptions {
-            delivery_mode: req.delivery_mode.unwrap_or(DeliveryMode::AtLeastOnce),
-            timeout_ms: req.timeout_ms.unwrap_or(30_000),
-            async_delivery: req.async_delivery.unwrap_or(false),
-            require_ack: req.require_ack.unwrap_or(true),
-            audit_enabled: req.audit_enabled.unwrap_or(true),
-            dlq_on_failure: req.dlq_on_failure.unwrap_or(true),
-        },
-    })
+        options,
+    };
+    route.validate_branches()?;
+    Ok(route)
+}
+
+/// 仅延时回复需要回调 URL；实时回复时丢弃，避免残留无效配置
+fn normalized_callback_url(reply_mode: ReplyMode, url: Option<String>) -> Option<String> {
+    if reply_mode != ReplyMode::Deferred {
+        return None;
+    }
+    url.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn build_route_targets(targets: Vec<RouteTargetRequest>) -> HsbResult<Vec<RouteTarget>> {
@@ -1925,20 +2046,42 @@ fn build_route_targets(targets: Vec<RouteTargetRequest>) -> HsbResult<Vec<RouteT
         });
     }
 
-    Ok(targets
+    targets
         .into_iter()
         .enumerate()
-        .map(|(index, target)| RouteTarget {
-            endpoint_id: SystemId::new(target.system_id),
-            weight: 100,
-            primary: index == 0,
-            fallback: index > 0,
-            transformer_ids: Vec::new(),
+        .map(|(index, target)| {
+            // endpoint 字段优先；兼容旧调用方仅提供 system_id 的写法
+            let endpoint_id = target
+                .endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    target
+                        .system_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+                .ok_or_else(|| HsbError::InvalidField {
+                    field: "targets.endpoint".to_string(),
+                    reason: "路由目标必须提供目标端点 ID（endpoint）".to_string(),
+                })?;
+            Ok(RouteTarget {
+                endpoint_id: SystemId::new(endpoint_id),
+                weight: 100,
+                primary: index == 0,
+                fallback: index > 0,
+                transformer_ids: Vec::new(),
+            })
         })
-        .collect())
+        .collect()
 }
 
-fn merge_route_options(route_options: &mut RouteOptions, req: &UpdateRouteRequest) {
+fn merge_route_options(
+    route_options: &mut RouteOptions,
+    req: &UpdateRouteRequest,
+) -> HsbResult<()> {
     if let Some(delivery_mode) = req.delivery_mode {
         route_options.delivery_mode = delivery_mode;
     }
@@ -1957,6 +2100,18 @@ fn merge_route_options(route_options: &mut RouteOptions, req: &UpdateRouteReques
     if let Some(dlq_on_failure) = req.dlq_on_failure {
         route_options.dlq_on_failure = dlq_on_failure;
     }
+    if let Some(reply_mode) = req.reply_mode {
+        route_options.reply_mode = reply_mode;
+    }
+    if let Some(callback_url) = &req.callback_url {
+        route_options.callback_url = Some(callback_url.clone());
+    }
+    if let Some(reply_timeout_secs) = req.reply_timeout_secs {
+        route_options.reply_timeout_secs = reply_timeout_secs;
+    }
+    route_options.callback_url =
+        normalized_callback_url(route_options.reply_mode, route_options.callback_url.take());
+    route_options.validate_reply()
 }
 
 fn apply_workflow_update(workflow: &mut Workflow, req: UpdateWorkflowRequest) -> HsbResult<()> {
@@ -2218,6 +2373,31 @@ fn validate_endpoint_protocol_properties(
                 return Err(HsbError::InvalidField {
                     field: "model".to_string(),
                     reason: "OPENAI endpoint requires a default model".to_string(),
+                });
+            }
+            Ok(())
+        }
+        ProtocolType::Mcp => {
+            if let Some(prefix) = properties
+                .get("mcp_tool_prefix")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                && hsb_core::mcp::sanitize_prefix(prefix) != prefix
+            {
+                return Err(HsbError::InvalidField {
+                    field: "mcp_tool_prefix".to_string(),
+                    reason: "工具前缀只能包含字母、数字、- 和单个 _，且不能以 _ 结尾".to_string(),
+                });
+            }
+            if let Some(timeout) = properties
+                .get("mcp_timeout_secs")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                && !timeout.parse::<u64>().is_ok_and(|value| value > 0)
+            {
+                return Err(HsbError::InvalidField {
+                    field: "mcp_timeout_secs".to_string(),
+                    reason: "超时必须是大于 0 的整数（秒）".to_string(),
                 });
             }
             Ok(())

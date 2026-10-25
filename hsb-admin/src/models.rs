@@ -8,8 +8,9 @@ use hsb_core::workflow::{
     WorkflowOptions,
 };
 use hsb_core::{
-    AuthConfig, ConnectionConfig, DeliveryMode, EndpointConfig, EndpointLifecycleStatus,
-    EndpointSecurity, IntegrationSystem, MatchRule, Organization,
+    AuthConfig, ConditionLogic, ConnectionConfig, DeliveryMode, EndpointConfig,
+    EndpointLifecycleStatus, EndpointSecurity, IntegrationSystem, MatchRule, Organization,
+    ReplyMode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -233,6 +234,8 @@ pub struct CreateRouteRequest {
     pub protocol: Option<ProtocolType>,
     pub conditions: Option<Vec<MatchRule>>,
     pub targets: Vec<RouteTargetRequest>,
+    /// 分拣分支：按顺序判断，首个命中的分支决定出口；`targets` 作为默认出口
+    pub branches: Option<Vec<RouteBranchRequest>>,
     pub transformer_ids: Option<Vec<String>>,
     pub priority: Option<i32>,
     pub enabled: Option<bool>,
@@ -242,15 +245,45 @@ pub struct CreateRouteRequest {
     pub require_ack: Option<bool>,
     pub audit_enabled: Option<bool>,
     pub dlq_on_failure: Option<bool>,
+    /// 回复模式：realtime（出口端实时回复）/ deferred（出口端延时回复，Webhook 回调入口端）
+    pub reply_mode: Option<ReplyMode>,
+    /// 延时回复时入口端的回调 URL
+    pub callback_url: Option<String>,
+    /// 延时回复等待时长（秒）
+    pub reply_timeout_secs: Option<u64>,
 }
 
 /// 路由目标请求
+///
+/// `endpoint` 为目标端点 ID；兼容旧调用方只传 `system_id` 的写法（此时以 system_id 作为端点 ID）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteTargetRequest {
-    pub system_id: String,
-    pub endpoint: String,
+    #[serde(default)]
+    pub system_id: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
     pub transport: Option<String>,
     pub timeout_secs: Option<u64>,
+}
+
+/// 分拣分支请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteBranchRequest {
+    pub name: Option<String>,
+    #[serde(default)]
+    pub logic: ConditionLogic,
+    #[serde(default)]
+    pub conditions: Vec<MatchRule>,
+    pub targets: Vec<RouteTargetRequest>,
+}
+
+/// 分拣分支响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteBranchResponse {
+    pub name: String,
+    pub logic: ConditionLogic,
+    pub conditions: Vec<MatchRule>,
+    pub targets: Vec<RouteTargetResponse>,
 }
 
 /// 更新路由请求
@@ -263,6 +296,7 @@ pub struct UpdateRouteRequest {
     pub protocol: Option<ProtocolType>,
     pub conditions: Option<Vec<MatchRule>>,
     pub targets: Option<Vec<RouteTargetRequest>>,
+    pub branches: Option<Vec<RouteBranchRequest>>,
     pub transformer_ids: Option<Vec<String>>,
     pub priority: Option<i32>,
     pub enabled: Option<bool>,
@@ -272,6 +306,12 @@ pub struct UpdateRouteRequest {
     pub require_ack: Option<bool>,
     pub audit_enabled: Option<bool>,
     pub dlq_on_failure: Option<bool>,
+    /// 回复模式：realtime（出口端实时回复）/ deferred（出口端延时回复，Webhook 回调入口端）
+    pub reply_mode: Option<ReplyMode>,
+    /// 延时回复时入口端的回调 URL
+    pub callback_url: Option<String>,
+    /// 延时回复等待时长（秒）
+    pub reply_timeout_secs: Option<u64>,
 }
 
 /// 路由响应
@@ -285,6 +325,7 @@ pub struct RouteResponse {
     pub protocol: Option<ProtocolType>,
     pub conditions: Vec<MatchRule>,
     pub targets: Vec<RouteTargetResponse>,
+    pub branches: Vec<RouteBranchResponse>,
     pub transformer_ids: Vec<String>,
     pub priority: i32,
     pub enabled: bool,
@@ -294,6 +335,9 @@ pub struct RouteResponse {
     pub require_ack: bool,
     pub audit_enabled: bool,
     pub dlq_on_failure: bool,
+    pub reply_mode: ReplyMode,
+    pub callback_url: Option<String>,
+    pub reply_timeout_secs: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -509,6 +553,54 @@ pub struct MessageResponse {
     pub status: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub processed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+// ============ 消息手动录入 ============
+
+/// 手动录入消息请求：以结构化字段构造消息并送入总线处理流程
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualMessageRequest {
+    /// 来源系统（必填）
+    pub source_system: String,
+    /// 目标系统（可选）
+    pub target_system: Option<String>,
+    /// 协议类型（HTTP/WEBHOOK/HL7V2/FHIR_R5/SOAP 等，默认 HTTP）
+    pub protocol: Option<String>,
+    /// 消息类型（如 ADT_A01）
+    pub message_type: Option<String>,
+    /// 消息主题（<domain>.<service>.<action>.<version>）
+    pub topic: Option<String>,
+    /// 优先级（LOW/NORMAL/HIGH/URGENT/CRITICAL，默认 NORMAL）
+    pub priority: Option<String>,
+    /// 关联 ID
+    pub correlation_id: Option<String>,
+    /// 附加消息头
+    pub headers: Option<HashMap<String, String>>,
+    /// 消息内容：JSON 值；医疗协议（HL7/FHIR/DICOM/SOAP）须提供字符串形式的原始报文
+    pub payload: serde_json::Value,
+}
+
+/// 手动录入消息的单路由投递结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualMessageDelivery {
+    pub route_id: String,
+    pub target: String,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+    /// 命中的分拣分支（走默认出口时为空）
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+/// 手动录入消息的处理结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualMessageResponse {
+    pub message_id: String,
+    pub trace_id: String,
+    pub protocol: String,
+    pub matched_routes: Vec<String>,
+    pub deliveries: Vec<ManualMessageDelivery>,
 }
 
 // ============ 死信队列相关 ============

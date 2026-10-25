@@ -57,6 +57,12 @@ pub mod http {
     pub const HEADER_PRIORITY: &str = "X-HSB-Priority";
     /// 自定义 Header：关联 ID
     pub const HEADER_CORRELATION_ID: &str = "X-HSB-Correlation-Id";
+    /// 自定义 Header：回复模式（realtime / deferred）
+    pub const HEADER_REPLY_MODE: &str = "X-HSB-Reply-Mode";
+    /// 自定义 Header：延时回复令牌（出口端回复时用于定位事务）
+    pub const HEADER_REPLY_TOKEN: &str = "X-HSB-Reply-Token";
+    /// 延时回复接收路径前缀，完整路径为 `{prefix}/{token}`
+    pub const REPLY_PATH_PREFIX: &str = "/api/messages/reply";
 }
 
 /// 消息队列常量（兼容 topic 格式）

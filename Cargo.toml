@@ -9,6 +9,7 @@ members = [
     "hsb-admin",
     "hsb-server",
     "hsb-mock-endpoints",
+    "xtask",
 ]
 
 [workspace.package]

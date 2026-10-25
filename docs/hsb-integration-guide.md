@@ -342,6 +342,66 @@ curl -X POST http://hsb-server:8081/api/v1/routes \
   }'
 ```
 
+### 第四步（补充）：回复方式 —— 实时回复 / 延时回复（Webhook）
+
+新建路由时通过 `reply_mode` 选择出口端的回复方式（界面“路由管理 → 新建路由 → 回复方式”）：
+
+| reply_mode | 说明 |
+|------------|------|
+| `realtime`（默认） | 出口端实时回复：出口端的同步响应在入站请求的响应 `deliveries[].response` 中直接带回。 |
+| `deferred` | 出口端延时回复：必须填写入口端回调地址 `callback_url`（可选 `reply_timeout_secs`，默认 86400）。同一事务无需再建回复路由。 |
+
+延时回复流程：
+
+1. 总线向出口端投递时附带请求头 `X-HSB-Reply-Token`（回复令牌）、`X-HSB-Correlation-Id`、`X-HSB-Reply-Mode: deferred`；入站响应的 `deliveries[]` 同时返回 `reply_token` 与 `callback_url`。
+2. 出口端处理完成后，向总线 `POST /api/messages/reply/{token}` 回复（`{token}` 可为回复令牌，或唯一对应的 `X-HSB-Correlation-Id`），请求体即回复内容。
+3. 总线将回复体 POST（Webhook）到路由配置的 `callback_url`，并附带 `X-HSB-Correlation-Id`、`X-HSB-Reply-Token`、`X-HSB-Message-Id`、`X-HSB-Route-Id` 请求头。回调失败时总线返回 503，事务保留，出口端可重试；成功后同一事务不可重复回复（404）。
+
+> 注意：待回复事务保存在内存中，服务重启后未完成的事务会失效。
+> 并非所有系统都支持 Webhook：对不支持的入口端，保持实时回复，并另建一条普通回复路由——以出口端点作为来源（入口）、原入口端作为目标（出口）。
+
+### 第四步（补充）：消息分拣（按内容选择出口）
+
+无需编写脚本：在“路由管理 → 新建/编辑路由 → 消息分拣”中添加分支，每个分支设置条件和出口端点；API 对应路由的 `branches` 字段。
+
+- 分支按顺序判断，**第一个满足条件的分支生效**；都不满足时走路由的 `targets`（默认出口，有分支时可为空，为空则该路由不投递并记为失败）。
+- 分支内条件用 `logic` 组合：`and`（全部满足）或 `or`（任一满足）。更复杂的组合（如 (A 且 B) 或 C）拆成多个分支。
+- 条件字段（`source` + `field_path`）：`message_field`（`message_type`/`source_system`/`protocol`/`priority`/`correlation_id`）、`payload`（JSON 路径，如 `order.type`；HL7 如 `PV1.PV1_2`、`PID.PID_5.0`，数组用下标）、`header`（不区分大小写）、`metadata`（`patient_id`/`visit_id`/`order_id`/`department_code` 等）。
+- 运算符：`equals`/`not_equals`/`contains`/`starts_with`/`ends_with`/`in`/`not_in`（逗号分隔）/`greater_than`/`less_than`/`regex`/`exists`/`not_exists`。
+- 入站响应与手动录入结果的 `deliveries[].branch` 会返回命中的分支名（走默认出口为空）。
+
+```json
+{
+  "name": "HIS分拣", "source_system": "HIS",
+  "targets": [{"endpoint": "DEFAULT_EP"}],
+  "branches": [
+    {"name": "检验", "logic": "or",
+     "conditions": [{"name": "t", "source": "payload", "field_path": "order.type", "operator": "in", "value": "LAB,MICRO", "negate": false}],
+     "targets": [{"endpoint": "LIS_EP"}]}
+  ]
+}
+```
+
+### 第四步（补充）：MCP 网关（智能体调用多个 MCP 服务）
+
+总线新增 `MCP` 端点类型，并内置 MCP 网关：智能体只连接总线一个地址，即可调用所有 MCP 服务的工具。
+
+1. **接入下游 MCP 服务**：在“端点管理”新建协议为 `MCP` 的端点，填写下游 MCP Server 的 Streamable HTTP 地址（主机、端口、路径如 `/mcp`）；下游需要认证时配置 Bearer / API Key。可选属性：`mcp_tool_prefix`（工具前缀，缺省为端点 ID）、`mcp_allowed_tools`（逗号分隔的工具白名单，缺省全部）、`mcp_timeout_secs`（默认 30）。
+2. **授权智能体**：在配置文件 `[[mcp.clients]]` 中为每个智能体配置 `name`、`token`、可选 `allowed_endpoints`（为空表示全部）。未配置任何令牌时网关拒绝调用，除非显式设置 `[mcp] allow_anonymous = true`（仅限受信网络）。
+3. **智能体连接**：`POST {总线地址}/mcp`（路径可由 `[mcp] path` 修改），请求头 `Authorization: Bearer <token>`（或 `X-API-Key`），JSON-RPC 2.0。支持 `initialize`、`ping`、`tools/list`、`tools/call`。
+4. **工具命名**：聚合后的工具名为 `<前缀>__<原工具名>`，如 `his__get_patient`；总线负责与各下游完成握手、保持会话并转发，下游返回 JSON 或 SSE 均可。
+5. **错误语义**：未知工具/无权限返回 JSON-RPC 错误 `-32602`；下游不可用以 `isError: true` 的工具结果返回，便于智能体读取原因。
+6. **管理界面**：“集成配置 → MCP 网关”展示接入地址、授权智能体、各 MCP 服务状态、聚合工具目录、工具调试和最近调用记录。
+
+```bash
+curl -X POST http://hsb-server:8080/mcp \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"his__get_patient","arguments":{"id":"P001"}}}'
+```
+
+> 当前网关仅提供工具（tools）能力，不转发资源/提示词；GET 流式通道返回 405。工具调用记录保存在内存中（最近 200 条）。
+
 ### 第五步：发送消息
 
 在业务代码中，向 HSB 发送消息即可，路由规则会自动将消息投递到 LIS。

@@ -194,9 +194,11 @@ impl MessageTrace {
             trace.spans.push(span);
 
             // 收集目标系统
-            if let Some(ref target) = event.target_system && !trace.target_systems.contains(target) {
-                    trace.target_systems.push(target.clone());
-                }
+            if let Some(ref target) = event.target_system
+                && !trace.target_systems.contains(target)
+            {
+                trace.target_systems.push(target.clone());
+            }
         }
 
         // 计算最终状态

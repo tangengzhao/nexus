@@ -234,9 +234,11 @@ impl MessageProcessor for LoggingProcessor {
             "Processing message"
         );
 
-        if self.log_payload && let Some(ref payload) = msg.payload {
-                info!(payload = %payload, "Message payload");
-            }
+        if self.log_payload
+            && let Some(ref payload) = msg.payload
+        {
+            info!(payload = %payload, "Message payload");
+        }
 
         Ok(())
     }

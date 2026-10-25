@@ -269,10 +269,12 @@ impl Message {
     /// 获取 payload 中的字段
     pub fn get_payload_field(&self, path: &str) -> Option<&serde_json::Value> {
         self.payload.as_ref().and_then(|p| {
-            let parts: Vec<&str> = path.split('.').collect();
             let mut current = p;
-            for part in parts {
-                current = current.get(part)?;
+            for part in path.split('.') {
+                current = match part.parse::<usize>() {
+                    Ok(index) if current.is_array() => current.get(index)?,
+                    _ => current.get(part)?,
+                };
             }
             Some(current)
         })

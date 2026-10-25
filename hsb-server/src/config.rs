@@ -34,6 +34,9 @@ pub struct ServerConfig {
     pub reliability: ReliabilitySettings,
     /// 日志配置
     pub logging: LoggingSettings,
+    /// MCP 网关配置
+    #[serde(default)]
+    pub mcp: hsb_core::mcp::McpGatewayConfig,
 }
 
 impl ServerConfig {
@@ -99,7 +102,9 @@ impl ServerConfig {
         }
 
         if self.sso.enabled && is_placeholder_secret(&self.sso.client_secret) {
-            anyhow::bail!("production SSO requires RUST_SSO_CLIENT_SECRET to be set to a non-placeholder secret");
+            anyhow::bail!(
+                "production SSO requires RUST_SSO_CLIENT_SECRET to be set to a non-placeholder secret"
+            );
         }
 
         if self.mq.enabled
@@ -109,7 +114,9 @@ impl ServerConfig {
             anyhow::bail!("production MQ requires non-default HSB_MQ_USERNAME/HSB_MQ_PASSWORD");
         }
 
-        if self.persistence.postgres_enabled && database_url_uses_placeholder_secret(&self.database.url) {
+        if self.persistence.postgres_enabled
+            && database_url_uses_placeholder_secret(&self.database.url)
+        {
             anyhow::bail!("production database URL contains a placeholder or default password");
         }
 

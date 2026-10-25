@@ -2207,6 +2207,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures-lite 2.6.1",
@@ -6530,6 +6531,10 @@ dependencies = [
  "thiserror",
  "time",
 ]
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
 
 [[package]]
 name = "y4m"

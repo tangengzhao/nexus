@@ -425,6 +425,35 @@ impl AuthConfig {
     }
 }
 
+impl AuthConfig {
+    /// 转换为出站 HTTP 请求头（OAuth2 / 证书 / SSO 需要额外的令牌交换，这里不处理）
+    pub fn to_headers(&self) -> HashMap<String, String> {
+        use base64::Engine as _;
+
+        let mut headers = HashMap::new();
+        match self {
+            Self::Basic { username, password } => {
+                let encoded = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{username}:{password}"));
+                headers.insert("Authorization".to_string(), format!("Basic {encoded}"));
+            }
+            Self::Bearer { token } => {
+                headers.insert("Authorization".to_string(), format!("Bearer {token}"));
+            }
+            Self::ApiKey { key, header_name } => {
+                let name = if header_name.trim().is_empty() {
+                    "X-API-Key"
+                } else {
+                    header_name.trim()
+                };
+                headers.insert(name.to_string(), key.clone());
+            }
+            _ => {}
+        }
+        headers
+    }
+}
+
 /// 端点配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {

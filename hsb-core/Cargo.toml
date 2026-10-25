@@ -21,6 +21,7 @@ serde_json = { workspace = true }
 serde_bytes = { workspace = true }
 
 # Types
+base64 = "0.22"
 ulid = { workspace = true }
 chrono = { workspace = true }
 bytes = { workspace = true }

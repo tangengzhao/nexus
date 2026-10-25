@@ -716,6 +716,20 @@ pub async fn reprocess_message(
     }
 }
 
+pub async fn submit_manual_message(
+    State(state): AppState,
+    Json(request): Json<ManualMessageRequest>,
+) -> impl IntoResponse {
+    match state.submit_manual_message(request).await {
+        Ok(response) => (StatusCode::ACCEPTED, Json(response)).into_response(),
+        Err(e) => (
+            StatusCode::from_u16(e.http_status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(ErrorResponse::from(e)),
+        )
+            .into_response(),
+    }
+}
+
 // ============ 死信队列 ============
 
 pub async fn list_dlq(
@@ -856,4 +870,115 @@ pub async fn reload_config(State(state): AppState) -> impl IntoResponse {
         )
             .into_response(),
     }
+}
+
+// ============ MCP 网关 ============
+
+fn mcp_disabled() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "error": "MCP 网关未启用", "code": "MCP_DISABLED" })),
+    )
+}
+
+/// 网关概览：路径、认证方式、可访问的智能体
+pub async fn mcp_info(State(state): AppState) -> impl IntoResponse {
+    let Some(gateway) = state.mcp_gateway() else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "enabled": false })),
+        );
+    };
+    let config = gateway.config();
+    let auth_mode = if !config.clients.is_empty() {
+        "tokens"
+    } else if config.allow_anonymous {
+        "anonymous"
+    } else {
+        "unconfigured"
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "enabled": true,
+            "path": config.path,
+            "auth_mode": auth_mode,
+            "clients": config.clients.iter().map(|c| serde_json::json!({
+                "name": c.name,
+                "allowed_endpoints": c.allowed_endpoints,
+            })).collect::<Vec<_>>(),
+            "tool_cache_secs": config.tool_cache_secs,
+            "protocol_versions": hsb_core::mcp::SUPPORTED_PROTOCOL_VERSIONS,
+        })),
+    )
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct McpToolsQuery {
+    pub refresh: Option<bool>,
+}
+
+/// 聚合后的工具目录与各 MCP 端点状态
+pub async fn mcp_tools(
+    State(state): AppState,
+    Query(query): Query<McpToolsQuery>,
+) -> impl IntoResponse {
+    let Some(gateway) = state.mcp_gateway() else {
+        return mcp_disabled().into_response();
+    };
+    let catalog = gateway.catalog(query.refresh.unwrap_or(false)).await;
+    (StatusCode::OK, Json(catalog)).into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct McpCallRequest {
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+/// 调试调用：以管理员身份调用某个聚合工具（与智能体走同一路径）
+pub async fn mcp_call(
+    State(state): AppState,
+    Json(req): Json<McpCallRequest>,
+) -> impl IntoResponse {
+    let Some(gateway) = state.mcp_gateway() else {
+        return mcp_disabled().into_response();
+    };
+    match gateway
+        .call_tool(&hsb_core::mcp::McpCaller::admin(), &req.tool, req.arguments)
+        .await
+    {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(error) => {
+            let status = if error.is_upstream() {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                Json(serde_json::json!({ "error": error.message, "code": "MCP_CALL_FAILED" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct McpCallsQuery {
+    pub limit: Option<usize>,
+}
+
+/// 最近的工具调用记录
+pub async fn mcp_calls(
+    State(state): AppState,
+    Query(query): Query<McpCallsQuery>,
+) -> impl IntoResponse {
+    let Some(gateway) = state.mcp_gateway() else {
+        return mcp_disabled().into_response();
+    };
+    let items = gateway.recent_calls(query.limit.unwrap_or(50).min(500));
+    let total = items.len();
+    (StatusCode::OK, Json(ListResponse { items, total })).into_response()
 }

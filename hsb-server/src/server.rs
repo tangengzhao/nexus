@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, Request, StatusCode, header::CONTENT_TYPE},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -24,15 +24,19 @@ use tower_http::timeout::TimeoutLayer;
 use tracing::{error, info, warn};
 
 use hsb_admin::audit::{AuditConfig, InMemoryAuditStorage};
-use hsb_admin::{AdminConfig, AdminServer, AdminState, MessageReplayService};
+use hsb_admin::{
+    AdminConfig, AdminServer, AdminState, ManualMessageDelivery, ManualMessageRequest,
+    ManualMessageResponse, MessageReplayService,
+};
 use hsb_common::{
-    HsbError, HsbResult, MessageStatus, ProtocolType, TraceId, constants::http as http_headers,
-    sso_client::SSOClient,
+    HsbError, HsbResult, MessagePriority, MessageStatus, ProtocolType, Topic, TraceId,
+    constants::http as http_headers, sso_client::SSOClient,
 };
 use hsb_core::engine::{
     self, DefaultDispatcher, Dispatcher as _, EndpointRegistry, InMemoryRouter, LoggingProcessor,
     MetricsProcessor, ProcessingPipeline, Router as _, ValidationProcessor,
 };
+use hsb_core::mcp::{McpAuthError, McpClient, McpGateway};
 use hsb_core::persistence::{
     CustomProtocolStore, EndpointStore, IdempotencyStore, PersistentMessageStore, PgStore,
     PostgresConfig, RedbStore, RouteStore, TopicStore, WorkflowStore,
@@ -42,7 +46,7 @@ use hsb_core::workflow::{
     InMemoryWorkflowExecutor, StepType, WorkflowContext, WorkflowExecutor, WorkflowStep,
     WorkflowStepHandler,
 };
-use hsb_core::{Message, MessageBuilder, MessageContext};
+use hsb_core::{Message, MessageBuilder, MessageContext, ReplyMode};
 
 use crate::config::ServerConfig;
 
@@ -58,6 +62,8 @@ struct HttpAppState {
     cookie_secure: bool,
     sso: Option<Arc<SsoWebState>>,
     message_runtime: Arc<MessageIngressRuntime>,
+    mcp: Option<Arc<McpGateway>>,
+    mcp_path: String,
 }
 
 #[derive(Clone)]
@@ -171,6 +177,30 @@ struct InboundDeliveryResponse {
     success: bool,
     duration_ms: u64,
     error: Option<String>,
+    /// realtime：`response` 为出口端的实时回复；deferred：出口端稍后回复，由总线 Webhook 回调入口端
+    reply_mode: &'static str,
+    /// 命中的分拣分支（走默认出口时为空）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    /// 出口端的实时回复内容（JSON 报文原样返回，其它按文本返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response: Option<serde_json::Value>,
+    /// 延时回复令牌，出口端回复时携带
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_token: Option<String>,
+    /// 延时回复将回调的入口端 URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callback_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplyAcceptedResponse {
+    token: String,
+    route_id: String,
+    message_id: String,
+    callback_url: String,
+    callback_status: u16,
+    duration_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,6 +228,7 @@ pub struct HsbServer {
     circuit_breakers: Arc<CircuitBreakerRegistry>,
     kafka_transport: Option<Arc<hsb_transport::kafka::KafkaTransport>>,
     message_runtime: Arc<MessageIngressRuntime>,
+    mcp_gateway: Arc<McpGateway>,
     workflow_executor: Arc<InMemoryWorkflowExecutor>,
 }
 
@@ -260,7 +291,7 @@ impl HsbServer {
         } else {
             None
         };
-        let (message_runtime, kafka_transport) = build_message_runtime(
+        let (message_runtime, kafka_transport, mcp_gateway) = build_message_runtime(
             &config,
             router.clone(),
             endpoints.clone(),
@@ -287,6 +318,7 @@ impl HsbServer {
             circuit_breakers,
             kafka_transport,
             message_runtime,
+            mcp_gateway,
             workflow_executor,
         })
     }
@@ -410,6 +442,7 @@ impl HsbServer {
         let admin_routes = hsb_admin::create_api_routes(Arc::new(self.build_admin_state()));
         let request_timeout = std::time::Duration::from_secs(self.config.http.request_timeout_secs);
         let max_body_size = self.config.http.max_body_size;
+        let mcp_path = normalize_mcp_path(&self.config.mcp.path);
         let app = Router::new()
             .route("/", get(ui_root))
             .route("/portal", get(home_page))
@@ -418,6 +451,13 @@ impl HsbServer {
             .route("/ui/app.js", get(ui_app_js))
             .route("/health", get(health))
             .route("/api/messages/inbound", post(inbound_message))
+            .route("/api/messages/reply/{token}", post(reply_message))
+            .route(
+                &mcp_path,
+                post(mcp_endpoint)
+                    .get(mcp_method_not_allowed)
+                    .delete(mcp_method_not_allowed),
+            )
             .route("/auth/login", get(auth_login))
             .route("/auth/callback", get(auth_callback))
             .route("/auth/logout", get(auth_logout))
@@ -463,6 +503,8 @@ impl HsbServer {
                 cookie_secure: self.config.http.tls_enabled,
                 sso: None,
                 message_runtime: self.message_runtime.clone(),
+                mcp: self.mcp_state(),
+                mcp_path: normalize_mcp_path(&self.config.mcp.path),
             });
         }
 
@@ -485,7 +527,13 @@ impl HsbServer {
                 sessions: Arc::new(RwLock::new(HashMap::new())),
             })),
             message_runtime: self.message_runtime.clone(),
+            mcp: self.mcp_state(),
+            mcp_path: normalize_mcp_path(&self.config.mcp.path),
         })
+    }
+
+    fn mcp_state(&self) -> Option<Arc<McpGateway>> {
+        self.config.mcp.enabled.then(|| self.mcp_gateway.clone())
     }
 
     fn build_admin_state(&self) -> AdminState {
@@ -522,6 +570,7 @@ impl HsbServer {
             self.circuit_breakers.clone(),
             Some(self.workflow_executor.clone() as Arc<dyn WorkflowExecutor>),
         )
+        .with_mcp_gateway(self.mcp_state())
     }
 
     async fn recover_pending_messages(&self) -> anyhow::Result<()> {
@@ -631,6 +680,183 @@ impl MessageIngressRuntime {
         self.process_message(message, false).await
     }
 
+    /// 手动录入：按结构化字段构造消息并走完整的总线处理流程
+    async fn submit_manual(
+        &self,
+        request: ManualMessageRequest,
+    ) -> Result<ManualMessageResponse, HsbError> {
+        let message = self.build_manual_message(request).await?;
+        let response = self.process_message(message, false).await?;
+        Ok(ManualMessageResponse {
+            message_id: response.message_id,
+            trace_id: response.trace_id,
+            protocol: response.protocol,
+            matched_routes: response.matched_routes,
+            deliveries: response
+                .deliveries
+                .into_iter()
+                .map(|delivery| ManualMessageDelivery {
+                    route_id: delivery.route_id,
+                    target: delivery.target,
+                    success: delivery.success,
+                    duration_ms: delivery.duration_ms,
+                    error: delivery.error,
+                    branch: delivery.branch,
+                })
+                .collect(),
+        })
+    }
+
+    /// 将手动录入的结构化字段构造为规范化消息：
+    /// 通用协议直接构建；医疗协议（HL7/FHIR/DICOM/SOAP）要求 payload 为字符串原文并经适配器解析
+    async fn build_manual_message(
+        &self,
+        request: ManualMessageRequest,
+    ) -> Result<Message, HsbError> {
+        let source_system = request.source_system.trim();
+        if source_system.is_empty() {
+            return Err(HsbError::InvalidField {
+                field: "source_system".to_string(),
+                reason: "来源系统不能为空".to_string(),
+            });
+        }
+
+        let protocol = match request
+            .protocol
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(name) => {
+                name.parse::<ProtocolType>()
+                    .map_err(|reason| HsbError::InvalidField {
+                        field: "protocol".to_string(),
+                        reason,
+                    })?
+            }
+            None => ProtocolType::Http,
+        };
+
+        let priority = match request
+            .priority
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => {
+                value
+                    .parse::<MessagePriority>()
+                    .map_err(|reason| HsbError::InvalidField {
+                        field: "priority".to_string(),
+                        reason,
+                    })?
+            }
+            None => MessagePriority::Normal,
+        };
+
+        // payload -> 原始字节：字符串按原文保留（供医疗协议解析），其他 JSON 值序列化
+        if request.payload.is_null() {
+            return Err(HsbError::InvalidField {
+                field: "payload".to_string(),
+                reason: "消息内容不能为空".to_string(),
+            });
+        }
+        let raw_payload: Vec<u8> = match &request.payload {
+            serde_json::Value::String(text) => text.clone().into_bytes(),
+            value => serde_json::to_vec(value).map_err(|e| HsbError::InvalidField {
+                field: "payload".to_string(),
+                reason: format!("payload 无法序列化为 JSON: {e}"),
+            })?,
+        };
+        if raw_payload.is_empty() {
+            return Err(HsbError::InvalidField {
+                field: "payload".to_string(),
+                reason: "消息内容不能为空".to_string(),
+            });
+        }
+
+        let mut message = match protocol {
+            ProtocolType::Http
+            | ProtocolType::Webhook
+            | ProtocolType::Custom
+            | ProtocolType::OpenAi
+            | ProtocolType::Mcp
+            | ProtocolType::Database
+            | ProtocolType::Grpc
+            | ProtocolType::MessageQueue
+            | ProtocolType::TcpRaw => {
+                let mut builder = MessageBuilder::new()
+                    .source_system(source_system)
+                    .protocol(protocol)
+                    .priority(priority)
+                    .raw_payload(raw_payload.clone());
+
+                if let Some(target_system) = optional_field(&request.target_system) {
+                    builder = builder.target_system(target_system);
+                }
+                if let Some(message_type) = optional_field(&request.message_type) {
+                    builder = builder.message_type(message_type);
+                }
+                if let Some(correlation_id) = optional_field(&request.correlation_id) {
+                    builder = builder.correlation_id(correlation_id);
+                }
+                if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&raw_payload) {
+                    builder = builder.payload(payload);
+                }
+                builder.build()?
+            }
+            medical => {
+                let adapter = self.adapters.get_required(medical)?;
+                let mut message = adapter
+                    .parse(
+                        Bytes::from(raw_payload.clone()),
+                        &hsb_core::ParseOptions {
+                            preserve_raw: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                message.protocol = medical;
+                message.source_system = source_system.to_string().into();
+                message.raw_payload = raw_payload;
+                if let Some(target_system) = optional_field(&request.target_system) {
+                    message.target_system = Some(target_system.into());
+                }
+                if let Some(message_type) = optional_field(&request.message_type) {
+                    message.message_type = Some(message_type);
+                }
+                if let Some(correlation_id) = optional_field(&request.correlation_id) {
+                    message.correlation_id = Some(correlation_id);
+                }
+                message
+            }
+        };
+
+        if let Some(topic) = optional_field(&request.topic) {
+            let topic = topic
+                .parse::<Topic>()
+                .map_err(|reason| HsbError::InvalidField {
+                    field: "topic".to_string(),
+                    reason,
+                })?;
+            message.topic = Some(topic);
+        }
+
+        if let Some(headers) = &request.headers {
+            for (key, value) in headers {
+                let key = key.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                message.headers.insert(key.to_string(), value.clone());
+            }
+        }
+
+        message.priority = priority;
+        message.sync_headers();
+        Ok(message)
+    }
+
     async fn build_message(&self, headers: &HeaderMap, body: Bytes) -> Result<Message, HsbError> {
         let protocol = resolve_protocol(headers, &body)?;
         let source_system = required_header(headers, http_headers::HEADER_SOURCE_SYSTEM)?;
@@ -644,6 +870,7 @@ impl MessageIngressRuntime {
             | ProtocolType::Webhook
             | ProtocolType::Custom
             | ProtocolType::OpenAi
+            | ProtocolType::Mcp
             | ProtocolType::Database => build_generic_http_message(
                 &source_system,
                 target_system.as_deref(),
@@ -688,6 +915,27 @@ impl MessageIngressRuntime {
 
         message.sync_headers();
         Ok(message)
+    }
+
+    /// 出口端延时回复：转发到入口端的回调 URL
+    async fn handle_reply(
+        &self,
+        key: &str,
+        body: Bytes,
+        content_type: Option<&str>,
+    ) -> HsbResult<ReplyAcceptedResponse> {
+        let delivery = self
+            .dispatcher
+            .deliver_reply(key, body, content_type)
+            .await?;
+        Ok(ReplyAcceptedResponse {
+            token: delivery.token,
+            route_id: delivery.route_id,
+            message_id: delivery.message_id,
+            callback_url: delivery.callback_url,
+            callback_status: delivery.status_code,
+            duration_ms: delivery.duration_ms,
+        })
     }
 
     async fn replay_message(&self, mut message: Message) -> HsbResult<()> {
@@ -754,15 +1002,36 @@ impl MessageIngressRuntime {
             match self.dispatcher.dispatch(&ctx, &route).await {
                 Ok(result) => {
                     any_success |= result.success;
+                    if !result.success {
+                        warn!(
+                            "Dispatch to route {} did not succeed: {}",
+                            route.id,
+                            result.error.as_deref().unwrap_or("unknown error")
+                        );
+                    }
+                    let response = if result.reply_mode == ReplyMode::Realtime {
+                        result
+                            .response
+                            .as_ref()
+                            .and_then(|body| reply_body_to_json(body))
+                    } else {
+                        None
+                    };
                     deliveries.push(InboundDeliveryResponse {
                         route_id: route.id.to_string(),
                         target: result.target_system,
                         success: result.success,
                         duration_ms: result.duration_ms,
                         error: result.error,
+                        reply_mode: result.reply_mode.as_str(),
+                        branch: result.branch,
+                        response,
+                        reply_token: result.reply_token,
+                        callback_url: result.callback_url,
                     });
                 }
                 Err(error) => {
+                    warn!("Dispatch to route {} failed: {}", route.id, error);
                     deliveries.push(InboundDeliveryResponse {
                         route_id: route.id.to_string(),
                         target: route
@@ -773,6 +1042,11 @@ impl MessageIngressRuntime {
                         success: false,
                         duration_ms: 0,
                         error: Some(error.to_string()),
+                        reply_mode: route.options.reply_mode.as_str(),
+                        branch: None,
+                        response: None,
+                        reply_token: None,
+                        callback_url: None,
                     });
                 }
             }
@@ -834,6 +1108,19 @@ impl MessageReplayService for MessageIngressRuntime {
     async fn replay(&self, message: Message) -> HsbResult<()> {
         self.replay_message(message).await
     }
+
+    async fn submit(&self, request: ManualMessageRequest) -> HsbResult<ManualMessageResponse> {
+        self.submit_manual(request).await
+    }
+}
+
+/// 去除首尾空白后过滤空字符串
+fn optional_field(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 async fn build_message_runtime(
@@ -845,6 +1132,7 @@ async fn build_message_runtime(
 ) -> (
     MessageIngressRuntime,
     Option<Arc<hsb_transport::kafka::KafkaTransport>>,
+    Arc<McpGateway>,
 ) {
     let adapters = Arc::new(crate::bootstrap::register_adapters(config));
     let (transports, kafka_transport) = crate::bootstrap::register_transports(config).await;
@@ -856,6 +1144,12 @@ async fn build_message_runtime(
     )));
     pipeline.add_processor(Arc::new(MetricsProcessor));
     pipeline.add_processor(Arc::new(ValidationProcessor::new(true)));
+
+    let mcp_gateway = Arc::new(McpGateway::new(
+        Arc::new(McpClient::new(transports.clone(), endpoints.clone())),
+        endpoints.clone(),
+        config.mcp.clone(),
+    ));
 
     let dispatcher = if let Some(idempotency_store) = idempotency_store {
         Arc::new(DefaultDispatcher::with_idempotency(
@@ -876,6 +1170,7 @@ async fn build_message_runtime(
             message_store,
         },
         kafka_transport,
+        mcp_gateway,
     )
 }
 
@@ -900,6 +1195,128 @@ async fn inbound_message(
         )
             .into_response(),
     }
+}
+
+/// 出口端延时回复入口：`/api/messages/reply/{token}`，token 为回复令牌或唯一的关联 ID
+async fn reply_message(
+    State(state): State<HttpAppState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    match state
+        .message_runtime
+        .handle_reply(&token, body, content_type)
+        .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => (
+            StatusCode::from_u16(error.http_status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(ApiErrorResponse {
+                error: error.to_string(),
+                code: error.error_code().to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+fn reply_body_to_json(body: &Bytes) -> Option<serde_json::Value> {
+    if body.is_empty() {
+        return None;
+    }
+    Some(
+        serde_json::from_slice(body).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(body).into_owned())
+        }),
+    )
+}
+
+fn normalize_mcp_path(path: &str) -> String {
+    let trimmed = path.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/mcp".to_string()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    }
+}
+
+/// MCP 网关入口（Streamable HTTP，POST JSON-RPC）：智能体通过它调用聚合后的多个 MCP 服务
+async fn mcp_endpoint(
+    State(state): State<HttpAppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(gateway) = state.mcp.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let header_str = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let caller = match gateway.authenticate(header_str("authorization"), header_str("x-api-key")) {
+        Ok(caller) => caller,
+        Err(McpAuthError::Unauthorized) => {
+            let mut response = (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiErrorResponse {
+                    error: "MCP 网关需要有效的访问令牌".to_string(),
+                    code: "UNAUTHORIZED".to_string(),
+                }),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static("Bearer"),
+            );
+            return response;
+        }
+        Err(McpAuthError::NotConfigured) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiErrorResponse {
+                    error: "MCP 网关未配置智能体令牌（[[mcp.clients]]），且未开启 allow_anonymous"
+                        .to_string(),
+                    code: "MCP_NOT_CONFIGURED".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let request: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": { "code": hsb_core::mcp::codes::PARSE_ERROR, "message": format!("JSON 解析失败: {e}") },
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match gateway.handle_rpc(request, &caller).await {
+        Some(response) => (StatusCode::OK, Json(response)).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+/// 网关不提供服务端主动推送流，GET/DELETE 返回 405（规范允许）
+async fn mcp_method_not_allowed() -> Response {
+    let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
+    response.headers_mut().insert(
+        axum::http::header::ALLOW,
+        axum::http::HeaderValue::from_static("POST"),
+    );
+    response
 }
 
 fn required_header(headers: &HeaderMap, name: &str) -> Result<String, HsbError> {
@@ -1031,7 +1448,8 @@ async fn hydrate_endpoint_registry(
             &endpoint.name,
             endpoint.protocol,
             &endpoint.address(),
-        );
+        )
+        .with_endpoint_details(&endpoint);
         info.enabled = endpoint.enabled;
         info.healthy = status
             .as_ref()
@@ -1091,6 +1509,8 @@ fn is_public_http_path(state: &HttpAppState, path: &str) -> bool {
     let app_path = app_relative_path(state, path);
     app_path == "/health"
         || app_path == "/api/messages/inbound"
+        || app_path.starts_with("/api/messages/reply/")
+        || (state.mcp.is_some() && app_path == state.mcp_path)
         || app_path.starts_with("/auth/")
 }
 
@@ -1100,7 +1520,9 @@ fn app_relative_path<'a>(state: &HttpAppState, path: &'a str) -> &'a str {
         return path;
     }
 
-    path.strip_prefix(prefix).filter(|value| !value.is_empty()).unwrap_or("/")
+    path.strip_prefix(prefix)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("/")
 }
 
 async fn ui_root(State(state): State<HttpAppState>) -> impl IntoResponse {
@@ -1661,6 +2083,522 @@ mod tests {
         assert_eq!(sent[0].1, Bytes::from_static(br#"{"patient_id":"P001"}"#));
     }
 
+    struct RecordingTransport {
+        sent: Arc<Mutex<Vec<TransportRequest>>>,
+        reply_body: &'static [u8],
+    }
+
+    #[async_trait]
+    impl Transport for RecordingTransport {
+        fn transport_type(&self) -> TransportType {
+            TransportType::Http
+        }
+
+        fn name(&self) -> &str {
+            "recording-http"
+        }
+
+        async fn send(&self, request: TransportRequest) -> Result<TransportResponse, HsbError> {
+            self.sent.lock().await.push(request);
+            Ok(TransportResponse::success(
+                Bytes::from_static(self.reply_body),
+                Duration::from_millis(1),
+            ))
+        }
+
+        async fn send_with_timeout(
+            &self,
+            request: TransportRequest,
+            _timeout: Duration,
+        ) -> Result<TransportResponse, HsbError> {
+            self.send(request).await
+        }
+
+        async fn health_check(&self) -> Result<HealthStatus, HsbError> {
+            Ok(HealthStatus::healthy())
+        }
+
+        fn stats(&self) -> TransportStats {
+            TransportStats::default()
+        }
+    }
+
+    async fn reply_mode_runtime(
+        options: RouteOptions,
+        sent: Arc<Mutex<Vec<TransportRequest>>>,
+    ) -> MessageIngressRuntime {
+        let router = Arc::new(InMemoryRouter::new());
+        router
+            .add_route(
+                RouteBuilder::new()
+                    .id("route_reply")
+                    .name("HIS -> LIS reply")
+                    .source(SourceMatch {
+                        system_id: Some("HIS".to_string()),
+                        protocol: Some(ProtocolType::Http),
+                        message_type_pattern: None,
+                    })
+                    .target(RouteTarget::primary("LIS_HTTP"))
+                    .options(options)
+                    .build()
+                    .expect("route should build"),
+            )
+            .await
+            .expect("route should be added");
+
+        let endpoints = Arc::new(RwLock::new(EndpointRegistry::new()));
+        endpoints
+            .write()
+            .await
+            .register(hsb_core::engine::EndpointInfo::new(
+                "LIS_HTTP",
+                "LIS HTTP",
+                ProtocolType::Http,
+                "http://lis.internal/api/orders",
+            ));
+        let mut transports = TransportRegistry::new();
+        transports.register(
+            "http",
+            Arc::new(RecordingTransport {
+                sent,
+                reply_body: br#"{"result":"accepted"}"#,
+            }),
+        );
+
+        let mut pipeline = ProcessingPipeline::new();
+        pipeline.add_processor(Arc::new(ValidationProcessor::new(true)));
+        MessageIngressRuntime {
+            adapters: Arc::new(engine::AdapterRegistry::new()),
+            pipeline: Arc::new(pipeline),
+            router,
+            dispatcher: Arc::new(DefaultDispatcher::new(
+                Arc::new(RwLock::new(transports)),
+                endpoints,
+            )),
+            message_store: None,
+        }
+    }
+
+    fn his_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http_headers::HEADER_SOURCE_SYSTEM,
+            "HIS".parse().expect("header should parse"),
+        );
+        headers.insert(
+            http_headers::HEADER_CORRELATION_ID,
+            "corr-001".parse().expect("header should parse"),
+        );
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "application/json".parse().expect("header should parse"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn realtime_reply_returns_outbound_response_to_inbound_caller() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let runtime = reply_mode_runtime(RouteOptions::default(), sent.clone()).await;
+
+        let response = runtime
+            .handle_http_inbound(&his_headers(), Bytes::from_static(br#"{"id":1}"#))
+            .await
+            .expect("inbound should succeed");
+
+        let delivery = &response.deliveries[0];
+        assert_eq!(delivery.reply_mode, "realtime");
+        assert_eq!(
+            delivery.response,
+            Some(serde_json::json!({"result": "accepted"}))
+        );
+        assert!(delivery.reply_token.is_none());
+
+        let sent = sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert!(
+            !sent[0]
+                .headers
+                .contains_key(http_headers::HEADER_REPLY_TOKEN)
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_reply_is_forwarded_to_inbound_callback_url() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let runtime = reply_mode_runtime(
+            RouteOptions {
+                reply_mode: ReplyMode::Deferred,
+                callback_url: Some("http://his.internal/callback".to_string()),
+                ..Default::default()
+            },
+            sent.clone(),
+        )
+        .await;
+
+        let response = runtime
+            .handle_http_inbound(&his_headers(), Bytes::from_static(br#"{"id":1}"#))
+            .await
+            .expect("inbound should succeed");
+
+        let delivery = &response.deliveries[0];
+        assert_eq!(delivery.reply_mode, "deferred");
+        assert!(delivery.response.is_none());
+        assert_eq!(
+            delivery.callback_url.as_deref(),
+            Some("http://his.internal/callback")
+        );
+        let token = delivery.reply_token.clone().expect("token should exist");
+
+        {
+            let sent = sent.lock().await;
+            assert_eq!(sent.len(), 1);
+            assert_eq!(
+                sent[0].headers.get(http_headers::HEADER_REPLY_TOKEN),
+                Some(&token)
+            );
+            assert_eq!(
+                sent[0].headers.get(http_headers::HEADER_REPLY_MODE),
+                Some(&"deferred".to_string())
+            );
+        }
+
+        // 出口端稍后携带关联 ID 回复
+        let accepted = runtime
+            .handle_reply(
+                "corr-001",
+                Bytes::from_static(br#"{"report":"done"}"#),
+                Some("application/json"),
+            )
+            .await
+            .expect("reply should be forwarded");
+        assert_eq!(accepted.token, token);
+        assert_eq!(accepted.callback_url, "http://his.internal/callback");
+
+        {
+            let sent = sent.lock().await;
+            assert_eq!(sent.len(), 2);
+            assert_eq!(sent[1].target, "http://his.internal/callback");
+            assert_eq!(sent[1].body, Bytes::from_static(br#"{"report":"done"}"#));
+            assert_eq!(
+                sent[1].headers.get(http_headers::HEADER_CORRELATION_ID),
+                Some(&"corr-001".to_string())
+            );
+        }
+
+        // 同一事务只能回复一次
+        let again = runtime
+            .handle_reply(&token, Bytes::from_static(b"{}"), None)
+            .await;
+        assert!(matches!(again, Err(HsbError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn branch_sorting_routes_message_to_matching_endpoint() {
+        use hsb_core::{
+            ConditionGroup, ConditionLogic, MatchOperator, MatchRule, MatchSource, RouteBranch,
+        };
+
+        let router = Arc::new(InMemoryRouter::new());
+        let rule = |path: &str, value: &str| MatchRule {
+            name: path.to_string(),
+            source: MatchSource::Payload,
+            field_path: path.to_string(),
+            operator: MatchOperator::Equals,
+            value: value.to_string(),
+            negate: false,
+        };
+        router
+            .add_route(
+                RouteBuilder::new()
+                    .id("sorter")
+                    .name("HIS sorter")
+                    .source(SourceMatch::system("HIS"))
+                    .branch(RouteBranch {
+                        name: "检验".to_string(),
+                        condition: ConditionGroup {
+                            logic: ConditionLogic::Or,
+                            rules: vec![rule("kind", "LAB"), rule("kind", "MICRO")],
+                        },
+                        targets: vec![RouteTarget::primary("LIS_HTTP")],
+                    })
+                    .branch(RouteBranch {
+                        name: "影像急诊".to_string(),
+                        condition: ConditionGroup {
+                            logic: ConditionLogic::And,
+                            rules: vec![rule("kind", "RIS"), rule("urgent", "true")],
+                        },
+                        targets: vec![RouteTarget::primary("RIS_HTTP")],
+                    })
+                    .build()
+                    .expect("route should build"),
+            )
+            .await
+            .expect("route should be added");
+
+        let endpoints = Arc::new(RwLock::new(EndpointRegistry::new()));
+        for (id, url) in [
+            ("LIS_HTTP", "http://lis.internal/o"),
+            ("RIS_HTTP", "http://ris.internal/o"),
+        ] {
+            endpoints
+                .write()
+                .await
+                .register(hsb_core::engine::EndpointInfo::new(
+                    id,
+                    id,
+                    ProtocolType::Http,
+                    url,
+                ));
+        }
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut transports = TransportRegistry::new();
+        transports.register(
+            "http",
+            Arc::new(RecordingTransport {
+                sent: sent.clone(),
+                reply_body: b"{}",
+            }),
+        );
+        let mut pipeline = ProcessingPipeline::new();
+        pipeline.add_processor(Arc::new(ValidationProcessor::new(true)));
+        let runtime = MessageIngressRuntime {
+            adapters: Arc::new(engine::AdapterRegistry::new()),
+            pipeline: Arc::new(pipeline),
+            router,
+            dispatcher: Arc::new(DefaultDispatcher::new(
+                Arc::new(RwLock::new(transports)),
+                endpoints,
+            )),
+            message_store: None,
+        };
+
+        let send = |body: &'static [u8]| {
+            let runtime = &runtime;
+            async move {
+                runtime
+                    .handle_http_inbound(&his_headers(), Bytes::from_static(body))
+                    .await
+            }
+        };
+
+        let lab = send(br#"{"kind":"MICRO"}"#).await.expect("lab ok");
+        assert_eq!(lab.deliveries[0].branch.as_deref(), Some("检验"));
+        let ris = send(br#"{"kind":"RIS","urgent":true}"#)
+            .await
+            .expect("ris ok");
+        assert_eq!(ris.deliveries[0].branch.as_deref(), Some("影像急诊"));
+        // 条件为“且”：缺一不可，且没有默认出口 -> 投递失败
+        let none = send(br#"{"kind":"RIS"}"#).await;
+        assert!(matches!(none, Err(HsbError::DeliveryFailed { .. })));
+
+        let sent = sent.lock().await;
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].target, "http://lis.internal/o");
+        assert_eq!(sent[1].target, "http://ris.internal/o");
+    }
+
+    #[tokio::test]
+    async fn reply_with_unknown_token_is_rejected() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let runtime = reply_mode_runtime(RouteOptions::default(), sent).await;
+        let result = runtime
+            .handle_reply("missing", Bytes::from_static(b"{}"), None)
+            .await;
+        assert!(matches!(result, Err(HsbError::NotFound { .. })));
+    }
+
+    #[test]
+    fn deferred_route_requires_valid_callback_url() {
+        let build = |callback_url: Option<&str>| {
+            RouteBuilder::new()
+                .id("r")
+                .name("r")
+                .target(RouteTarget::primary("LIS"))
+                .options(RouteOptions {
+                    reply_mode: ReplyMode::Deferred,
+                    callback_url: callback_url.map(str::to_string),
+                    ..Default::default()
+                })
+                .build()
+        };
+        assert!(build(None).is_err());
+        assert!(build(Some("ftp://x/y")).is_err());
+        assert!(build(Some("http://")).is_err());
+        assert!(build(Some("https://his.example.com/cb")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn manual_submit_processes_structured_message() {
+        let router = Arc::new(InMemoryRouter::new());
+        router
+            .add_route(
+                RouteBuilder::new()
+                    .id("route_manual_his_to_lis")
+                    .name("HIS -> LIS manual")
+                    .source(SourceMatch {
+                        system_id: Some("HIS".to_string()),
+                        protocol: Some(ProtocolType::Http),
+                        message_type_pattern: None,
+                    })
+                    .target(RouteTarget::primary("LIS_HTTP"))
+                    .build()
+                    .expect("route should build"),
+            )
+            .await
+            .expect("route should be added");
+
+        let endpoints = Arc::new(RwLock::new(EndpointRegistry::new()));
+        endpoints
+            .write()
+            .await
+            .register(hsb_core::engine::EndpointInfo::new(
+                "LIS_HTTP",
+                "LIS HTTP",
+                ProtocolType::Http,
+                "http://lis.internal/api/orders",
+            ));
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut transports = TransportRegistry::new();
+        transports.register("http", Arc::new(MockTransport { sent: sent.clone() }));
+
+        let mut pipeline = ProcessingPipeline::new();
+        pipeline.add_processor(Arc::new(ValidationProcessor::new(true)));
+        let message_store = Arc::new(MockMessageStore::default());
+
+        let runtime = MessageIngressRuntime {
+            adapters: Arc::new(engine::AdapterRegistry::new()),
+            pipeline: Arc::new(pipeline),
+            router: router.clone(),
+            dispatcher: Arc::new(DefaultDispatcher::new(
+                Arc::new(RwLock::new(transports)),
+                endpoints,
+            )),
+            message_store: Some(message_store.clone()),
+        };
+
+        let request = ManualMessageRequest {
+            source_system: "HIS".to_string(),
+            target_system: Some("LIS".to_string()),
+            protocol: Some("HTTP".to_string()),
+            message_type: Some("ORM^O01".to_string()),
+            topic: Some("medical.order.create.v1".to_string()),
+            priority: Some("HIGH".to_string()),
+            correlation_id: Some("corr-42".to_string()),
+            headers: Some(HashMap::from([(
+                "X-Manual".to_string(),
+                "true".to_string(),
+            )])),
+            payload: serde_json::json!({"patient_id": "P001"}),
+        };
+
+        let response = runtime
+            .submit_manual(request)
+            .await
+            .expect("manual message should be processed");
+
+        assert_eq!(
+            response.matched_routes,
+            vec!["route_manual_his_to_lis".to_string()]
+        );
+        assert_eq!(response.protocol, "HTTP");
+        assert_eq!(response.deliveries.len(), 1);
+        assert!(response.deliveries[0].success);
+
+        let persisted = message_store
+            .get_message(&response.message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("message should be persisted");
+        assert_eq!(persisted.status, MessageStatus::Completed);
+        assert_eq!(persisted.source_system.as_str(), "HIS");
+        assert_eq!(
+            persisted.target_system.as_ref().map(|id| id.as_str()),
+            Some("LIS")
+        );
+        assert_eq!(persisted.message_type.as_deref(), Some("ORM^O01"));
+        assert_eq!(persisted.priority, MessagePriority::High);
+        assert_eq!(
+            persisted.topic.as_ref().map(ToString::to_string),
+            Some("medical.order.create.v1".to_string())
+        );
+        assert_eq!(persisted.correlation_id.as_deref(), Some("corr-42"));
+        assert_eq!(
+            persisted.headers.get("X-Manual").map(String::as_str),
+            Some("true")
+        );
+
+        let sent = sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "http://lis.internal/api/orders");
+        assert_eq!(sent[0].1, Bytes::from_static(br#"{"patient_id":"P001"}"#));
+    }
+
+    #[tokio::test]
+    async fn manual_submit_rejects_blank_source_system_and_empty_payload() {
+        let mut pipeline = ProcessingPipeline::new();
+        pipeline.add_processor(Arc::new(ValidationProcessor::new(true)));
+        let runtime = MessageIngressRuntime {
+            adapters: Arc::new(engine::AdapterRegistry::new()),
+            pipeline: Arc::new(pipeline),
+            router: Arc::new(InMemoryRouter::new()),
+            dispatcher: Arc::new(DefaultDispatcher::new(
+                Arc::new(RwLock::new(TransportRegistry::new())),
+                Arc::new(RwLock::new(EndpointRegistry::new())),
+            )),
+            message_store: None,
+        };
+
+        let blank_source = ManualMessageRequest {
+            source_system: "   ".to_string(),
+            target_system: None,
+            protocol: None,
+            message_type: None,
+            topic: None,
+            priority: None,
+            correlation_id: None,
+            headers: None,
+            payload: serde_json::json!({"x": 1}),
+        };
+        let error = runtime
+            .submit_manual(blank_source)
+            .await
+            .expect_err("blank source_system should be rejected");
+        assert!(
+            matches!(error, HsbError::InvalidField { ref field, .. } if field == "source_system"),
+            "unexpected error: {error:?}"
+        );
+
+        let empty_payload = ManualMessageRequest {
+            source_system: "HIS".to_string(),
+            payload: serde_json::Value::Null,
+            ..blank_source_filler()
+        };
+        let error = runtime
+            .submit_manual(empty_payload)
+            .await
+            .expect_err("null payload should be rejected");
+        assert!(
+            matches!(error, HsbError::InvalidField { ref field, .. } if field == "payload"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    fn blank_source_filler() -> ManualMessageRequest {
+        ManualMessageRequest {
+            source_system: String::new(),
+            target_system: None,
+            protocol: None,
+            message_type: None,
+            topic: None,
+            priority: None,
+            correlation_id: None,
+            headers: None,
+            payload: serde_json::Value::Null,
+        }
+    }
+
     #[tokio::test]
     async fn exactly_once_dispatch_suppresses_duplicate_delivery() {
         let router = Arc::new(InMemoryRouter::new());
@@ -1791,6 +2729,10 @@ mod tests {
         let second = generate_session_id().expect("session id should be generated");
         assert_ne!(first, second);
         assert!(first.len() >= 40);
-        assert!(first.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+        assert!(
+            first
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        );
     }
 }

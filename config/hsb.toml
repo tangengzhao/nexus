@@ -113,3 +113,18 @@ json_format = false
 file_path = "logs/hsb.log"
 max_file_size_mb = 100
 max_files = 10
+
+# MCP 网关：智能体通过 POST /mcp 统一调用所有 MCP 类型端点的工具
+[mcp]
+enabled = true
+path = "/mcp"
+# 未配置任何 [[mcp.clients]] 时是否允许匿名访问（仅限受信网络的开发环境）
+allow_anonymous = false
+tool_cache_secs = 30
+call_log_capacity = 200
+
+# 授权智能体：token 请使用高强度随机值；allowed_endpoints 为空表示可访问全部 MCP 端点
+# [[mcp.clients]]
+# name = "triage-agent"
+# token = "<随机令牌>"
+# allowed_endpoints = ["HIS_MCP", "LIS_MCP"]

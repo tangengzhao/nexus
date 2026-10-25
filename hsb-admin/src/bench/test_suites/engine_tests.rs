@@ -41,6 +41,7 @@ fn create_test_route(id: &str, source: &str, target: &str) -> Route {
             require_ack: true,
             audit_enabled: true,
             dlq_on_failure: true,
+            ..Default::default()
         })
         .build()
         .expect("创建测试路由失败")

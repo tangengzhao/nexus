@@ -6,13 +6,15 @@ mod dispatcher;
 mod pipeline;
 mod registry;
 mod router;
+mod webhook;
 
 pub use dispatcher::*;
 pub use pipeline::*;
 pub use registry::*;
 pub use router::*;
+pub use webhook::*;
 
-use crate::{Message, MessageContext, Route};
+use crate::{Message, MessageContext, ReplyMode, Route};
 use async_trait::async_trait;
 use hsb_common::HsbResult;
 
@@ -78,6 +80,14 @@ pub struct DispatchResult {
     pub duration_ms: u64,
     /// 重试次数
     pub retry_count: u32,
+    /// 回复模式
+    pub reply_mode: ReplyMode,
+    /// 命中的分拣分支名称（走默认出口时为 None）
+    pub branch: Option<String>,
+    /// 延时回复令牌（仅延时回复且投递成功时存在）
+    pub reply_token: Option<String>,
+    /// 延时回复的入口端回调 URL
+    pub callback_url: Option<String>,
 }
 
 impl DispatchResult {
@@ -95,6 +105,10 @@ impl DispatchResult {
             error: None,
             duration_ms,
             retry_count: 0,
+            reply_mode: ReplyMode::Realtime,
+            branch: None,
+            reply_token: None,
+            callback_url: None,
         }
     }
 
@@ -113,6 +127,10 @@ impl DispatchResult {
             error: Some(error.to_string()),
             duration_ms,
             retry_count,
+            reply_mode: ReplyMode::Realtime,
+            branch: None,
+            reply_token: None,
+            callback_url: None,
         }
     }
 }

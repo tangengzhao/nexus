@@ -429,6 +429,16 @@ nexus/
 
 ## 🔨 开发
 
+### 发布打包（xtask）
+
+```bash
+cargo xtask dist      # 编译 release 二进制并组装 dist/ 发布包（含 tar.gz 与 SHA256SUMS）
+cargo xtask docker    # 构建 Docker 镜像（--save 导出 / --push 推送 / --platform 多架构）
+cargo xtask check     # 快速验证（cargo check --workspace）
+```
+
+发布包输出到 `dist/nexus-hsb-<version>/`，目标服务器无需 Rust 工具链，直接 `./hsb-server start`，详见包内 README-DEPLOY.md。
+
 ### 运行测试
 
 ```bash

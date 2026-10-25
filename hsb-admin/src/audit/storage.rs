@@ -28,47 +28,65 @@ impl InMemoryAuditStorage {
             .iter()
             .filter(|e| {
                 // Trace ID
-                if let Some(ref trace_id) = filter.trace_id && e.trace_id.as_ref() != Some(trace_id) {
-                        return false;
-                    }
+                if let Some(ref trace_id) = filter.trace_id
+                    && e.trace_id.as_ref() != Some(trace_id)
+                {
+                    return false;
+                }
 
                 // Message ID
-                if let Some(ref message_id) = filter.message_id && e.message_id.as_ref() != Some(message_id) {
-                        return false;
-                    }
+                if let Some(ref message_id) = filter.message_id
+                    && e.message_id.as_ref() != Some(message_id)
+                {
+                    return false;
+                }
 
                 // Event types
-                if let Some(ref types) = filter.event_types && !types.contains(&e.event_type) {
-                        return false;
-                    }
+                if let Some(ref types) = filter.event_types
+                    && !types.contains(&e.event_type)
+                {
+                    return false;
+                }
 
                 // Min severity
-                if let Some(min_severity) = filter.min_severity && e.severity < min_severity {
-                        return false;
-                    }
+                if let Some(min_severity) = filter.min_severity
+                    && e.severity < min_severity
+                {
+                    return false;
+                }
 
                 // Source system
-                if let Some(ref source) = filter.source_system && e.source_system.as_ref() != Some(source) {
-                        return false;
-                    }
+                if let Some(ref source) = filter.source_system
+                    && e.source_system.as_ref() != Some(source)
+                {
+                    return false;
+                }
 
                 // Target system
-                if let Some(ref target) = filter.target_system && e.target_system.as_ref() != Some(target) {
-                        return false;
-                    }
+                if let Some(ref target) = filter.target_system
+                    && e.target_system.as_ref() != Some(target)
+                {
+                    return false;
+                }
 
                 // Component
-                if let Some(ref component) = filter.component && &e.component != component {
-                        return false;
-                    }
+                if let Some(ref component) = filter.component
+                    && &e.component != component
+                {
+                    return false;
+                }
 
                 // Time range
-                if let Some(from) = filter.from_time && e.timestamp < from {
-                        return false;
-                    }
-                if let Some(to) = filter.to_time && e.timestamp > to {
-                        return false;
-                    }
+                if let Some(from) = filter.from_time
+                    && e.timestamp < from
+                {
+                    return false;
+                }
+                if let Some(to) = filter.to_time
+                    && e.timestamp > to
+                {
+                    return false;
+                }
 
                 // Failed only
                 if filter.failed_only && e.success {

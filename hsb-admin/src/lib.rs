@@ -167,6 +167,7 @@ mod tests {
     #[derive(Default)]
     struct MockMessageReplayService {
         replayed: RwLock<Vec<Message>>,
+        submitted: RwLock<Vec<ManualMessageRequest>>,
     }
 
     #[derive(Default)]
@@ -391,6 +392,42 @@ mod tests {
         async fn replay(&self, message: Message) -> hsb_common::HsbResult<()> {
             self.replayed.write().await.push(message);
             Ok(())
+        }
+
+        async fn submit(
+            &self,
+            request: ManualMessageRequest,
+        ) -> hsb_common::HsbResult<ManualMessageResponse> {
+            let message = MessageBuilder::new()
+                .source_system(request.source_system.as_str())
+                .protocol(
+                    request
+                        .protocol
+                        .as_deref()
+                        .unwrap_or("HTTP")
+                        .parse()
+                        .map_err(|reason| hsb_common::HsbError::InvalidField {
+                            field: "protocol".to_string(),
+                            reason,
+                        })?,
+                )
+                .raw_payload(serde_json::to_vec(&request.payload).unwrap_or_default())
+                .build()?;
+            self.submitted.write().await.push(request);
+            Ok(ManualMessageResponse {
+                message_id: message.id.to_string(),
+                trace_id: message.trace_id.to_string(),
+                protocol: message.protocol.name().to_string(),
+                matched_routes: vec!["mock_route".to_string()],
+                deliveries: vec![ManualMessageDelivery {
+                    route_id: "mock_route".to_string(),
+                    target: "mock_target".to_string(),
+                    success: true,
+                    duration_ms: 1,
+                    error: None,
+                    branch: None,
+                }],
+            })
         }
     }
 
@@ -1287,5 +1324,57 @@ mod tests {
         assert_eq!(replayed.len(), 1);
         assert_eq!(replayed[0].id.to_string(), message_id);
         assert_eq!(replayed[0].meta.retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn manual_message_api_submits_structured_message() {
+        let replay = Arc::new(MockMessageReplayService::default());
+        let app = build_test_router(None, None, None, Some(replay.clone()));
+
+        let response = send_json(
+            &app,
+            "POST",
+            "/api/v1/messages/manual",
+            json!({
+                "source_system": "HIS",
+                "target_system": "LIS",
+                "protocol": "HTTP",
+                "message_type": "ORM^O01",
+                "priority": "HIGH",
+                "correlation_id": "corr-42",
+                "headers": { "X-Manual": "true" },
+                "payload": { "order_id": "ORD-9", "patient_id": "P001" }
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let submitted: ManualMessageResponse = read_json(response).await;
+        assert_eq!(submitted.protocol, "HTTP");
+        assert_eq!(submitted.matched_routes, vec!["mock_route".to_string()]);
+        assert_eq!(submitted.deliveries.len(), 1);
+        assert!(submitted.deliveries[0].success);
+        assert!(!submitted.message_id.is_empty());
+
+        let requests = replay.submitted.read().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].source_system, "HIS");
+        assert_eq!(requests[0].priority.as_deref(), Some("HIGH"));
+        assert_eq!(
+            requests[0].headers.as_ref().and_then(|h| h.get("X-Manual")),
+            Some(&"true".to_string())
+        );
+
+        // 缺少必填来源系统应返回 400（INVALID_FIELD）
+        let invalid = send_json(
+            &app,
+            "POST",
+            "/api/v1/messages/manual",
+            json!({
+                "source_system": "   ",
+                "payload": { "x": 1 }
+            }),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
 }

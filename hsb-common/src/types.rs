@@ -303,6 +303,8 @@ pub enum ProtocolType {
     /// OpenAI 兼容大语言模型 API
     #[serde(rename = "OPENAI")]
     OpenAi,
+    /// MCP（Model Context Protocol）服务，供智能体调用工具
+    Mcp,
     /// 私有协议
     Custom,
 }
@@ -323,6 +325,7 @@ impl ProtocolType {
             Self::MessageQueue => "MQ",
             Self::Database => "DATABASE",
             Self::OpenAi => "OPENAI",
+            Self::Mcp => "MCP",
             Self::Custom => "CUSTOM",
         }
     }
@@ -342,6 +345,7 @@ impl ProtocolType {
             Self::MessageQueue => None,
             Self::Database => None,
             Self::OpenAi => Some(443),
+            Self::Mcp => Some(80),
             Self::Custom => None,
         }
     }
@@ -371,6 +375,7 @@ impl std::str::FromStr for ProtocolType {
             "DATABASE" | "DB" | "POSTGRES" | "POSTGRESQL" | "ORACLE" | "MYSQL" | "SQLSERVER"
             | "MSSQL" | "HIVE" | "CLICKHOUSE" => Ok(Self::Database),
             "OPENAI" | "OPEN_AI" | "LLM" | "CHATGPT" => Ok(Self::OpenAi),
+            "MCP" | "MCP_SERVER" | "MODEL_CONTEXT_PROTOCOL" => Ok(Self::Mcp),
             "CUSTOM" => Ok(Self::Custom),
             _ => Ok(Self::Custom),
         }

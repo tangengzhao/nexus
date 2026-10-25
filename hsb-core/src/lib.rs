@@ -7,6 +7,7 @@
 pub mod catalog;
 pub mod context;
 pub mod endpoint;
+pub mod mcp;
 pub mod message;
 pub mod route;
 pub mod transformer;
@@ -31,8 +32,9 @@ pub use endpoint::{
 };
 pub use message::{Message, MessageBuilder, MessageMeta, MessageMetadata};
 pub use route::{
-    DeliveryMode, MatchOperator, MatchRule, MatchSource, Route, RouteBuilder, RouteOptions,
-    RouteTarget, SourceMatch,
+    ConditionGroup, ConditionLogic, DEFAULT_REPLY_TIMEOUT_SECS, DeliveryMode, MatchOperator,
+    MatchRule, MatchSource, ReplyMode, Route, RouteBranch, RouteBuilder, RouteOptions, RouteTarget,
+    SourceMatch,
 };
 pub use transformer::{TransformContext, Transformer, TransformerChain};
 pub use workflow::{

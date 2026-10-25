@@ -203,18 +203,26 @@ impl DeadLetterQueue for InMemoryDlq {
             .values()
             .filter(|dl| {
                 // 应用过滤条件
-                if let Some(ref source) = filter.source_system && dl.message.source_system.to_string() != *source {
-                        return false;
-                    }
-                if let Some(ref target) = filter.target_system && dl.target_system.as_ref() != Some(target) {
-                        return false;
-                    }
-                if let Some(from) = filter.from_time && dl.dead_lettered_at < from {
-                        return false;
-                    }
-                if let Some(to) = filter.to_time && dl.dead_lettered_at > to {
-                        return false;
-                    }
+                if let Some(ref source) = filter.source_system
+                    && dl.message.source_system.to_string() != *source
+                {
+                    return false;
+                }
+                if let Some(ref target) = filter.target_system
+                    && dl.target_system.as_ref() != Some(target)
+                {
+                    return false;
+                }
+                if let Some(from) = filter.from_time
+                    && dl.dead_lettered_at < from
+                {
+                    return false;
+                }
+                if let Some(to) = filter.to_time
+                    && dl.dead_lettered_at > to
+                {
+                    return false;
+                }
                 true
             })
             .cloned()

@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Nexus HSB 开发/发布自动化任务（编译打包 dist、Docker 镜像）"
+
+# 刻意保持零依赖，保证 xtask 秒级编译
+[dependencies]
